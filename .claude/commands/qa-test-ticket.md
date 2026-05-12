@@ -151,7 +151,14 @@ Once the user provides:
 
 ## Phase 3 — Plan and confirm
 
-Build the plan in **three folders**:
+Build the plan in **four folders**:
+
+### Happy Path - All Endpoints folder
+One valid-data request per `(method, path)` this ticket touches (the endpoints listed in Phase 1's analysis). No negatives, no auth-matrix variants — just a smoke pass across the ticket's surface area with valid data.
+
+Naming: `<METHOD> <path>` exactly (e.g. `POST /api/v1/orders`, `GET /api/v1/orders/{id}`). No `HP` prefix, no `TC` prefix, no status suffix.
+
+The login request belongs in `Setup` (not here) — Happy Path runs after Setup so `{{accessToken}}` is already populated.
 
 ### Setup folder
 - Login first
@@ -198,6 +205,11 @@ Setup (<N>):
   3. Create Supplier
   ...
 
+Happy Path - All Endpoints (<N>):
+  POST /api/v1/orders
+  GET  /api/v1/orders/{id}
+  ...
+
 Positive (<N>):
   TC01: <scenario> (200)
   ...
@@ -224,9 +236,9 @@ Ask: `Does this look right, or any changes?` Wait for confirmation.
 - `auth`: bearer using `{{accessToken}}`
 - `variable`: include `baseUrl`, `accessToken`, `refreshToken`, `platformApiKey` (if API-key auth used), plus one `test<Entity>Id` per chained entity (`testBranchId`, `testSupplierId`, etc.)
 
-### 4b — Create the 3 folders
+### 4b — Create the 4 folders
 
-`mcp__plugin_postman_postman__createCollectionFolder` for `Setup`, `Positive`, `Negative`. Save IDs.
+`mcp__plugin_postman_postman__createCollectionFolder` for `Setup`, `Happy Path - All Endpoints`, `Positive`, `Negative` — **in that order** so they appear in run order in the collection. Save IDs.
 
 ### 4c — Create requests
 
@@ -236,6 +248,17 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and `auth.type = "noauth"`
 - `body`: realistic data drawn from the ticket's specific values + OpenAPI schema. Use `{{$timestamp}}` for unique fields.
 - `events` test script — rules below
+
+**Happy Path - All Endpoints requests**: status-only assertion, valid body, no negatives.
+- `name`: `<METHOD> <path>` exactly (no prefix, no status suffix)
+- Test script:
+  ```js
+  pm.test('Status is 2xx', () => {
+    pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);
+  });
+  ```
+- Path params resolve to `{{test<Entity>Id}}` chained variables populated by Setup. If Setup doesn't create the needed entity, leave the placeholder as-is and document it in the request description.
+- Variable-set blocks (`pm.environment.set(...)`) are not added here — chaining stays in Setup. Happy Path is a read-mostly smoke pass; entity-creating endpoints in Happy Path produce throwaway records.
 
 **Test script rules**:
 - Top scope uses `let`, never `const` (Newman crashes on `const` re-declaration)
@@ -279,7 +302,7 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 ### 5a — Export collection
 
 ```bash
-POSTMAN_API_KEY="<from ~/.claude/settings.json>"
+POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<project-dir>/<key-lowercase>-collection.json"
@@ -374,7 +397,7 @@ Stop conditions:
 After ANY `updateCollectionRequest` call in this phase, re-export the collection from Postman to the local file so Newman re-runs read the patched state:
 
 ```bash
-POSTMAN_API_KEY="<from ~/.claude/settings.json>"
+POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<KEY-lowercase>-collection.json"
@@ -661,6 +684,6 @@ JIRA_PROJECT_KEY (saved to .env): <KEY>
 - **Setup scales to need** — don't add irrelevant prep, don't skip required state.
 - **Never `const` at top scope** in test scripts.
 - **One-off IDs do NOT go in `.env`** — only persistent creds/keys.
-- **`POSTMAN_API_KEY` stays in `~/.claude/settings.json`**, never in project `.env`.
+- **`POSTMAN_API_KEY` stays in `.claude/settings.local.json` (project-local, gitignored) or `~/.claude/settings.json` (global)**, never in project `.env`. Local wins if both set.
 - **Never `--bail` the Newman run.** The initial run must complete to fill the HTML report with every failure. Auto-fix iterations also run to completion. `--bail` is allowed only in Phase 8's manual debugging tips for human-driven single-bug triage, never as default.
 - **Cloud + file must stay in sync.** Any change the agent makes to a request via Postman MCP must be paired with a re-export of the local collection JSON (Phase 6d's curl command). Newman reads the file, so an out-of-sync file = patches ignored on the next run.

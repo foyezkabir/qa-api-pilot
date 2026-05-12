@@ -70,15 +70,33 @@ Call `mcp__plugin_postman_postman__getAuthenticatedUser`.
 - **Success** → note username + user ID. Tell user: `Postman connected as: <username>`. Continue to 0b.
 - **Fails (tool not found / auth error)** → stop and tell the user:
 
-> Postman plugin is not connected. Fix this first:
+> Postman plugin is not connected. Fix this first.
 >
-> 1. Generate a Postman API key at https://go.postman.co/settings/me/api-keys (name it "Claude Code", copy — starts with `PMAK-`)
-> 2. Open `~/.claude/settings.json` and add under the top-level object:
+> 1. Generate a Postman API key at https://go.postman.co/settings/me/api-keys (name it "Claude Code", copy — starts with `PMAK-`).
+> 2. Decide **where to put the key**. Two valid locations — pick one (you don't need both):
+>
+>    **(a) Project-local (recommended for cloners)** — `<project>/.claude/settings.local.json` (gitignored, never committed). Per-project; great if you work on multiple Postman accounts/workspaces.
+>    ```bash
+>    cp .claude/settings.local.json.example .claude/settings.local.json
+>    # then edit .claude/settings.local.json and paste your PMAK
+>    ```
+>    If `.claude/settings.local.json` already exists (e.g. with permissions), merge an `env` block into it instead of overwriting:
+>    ```json
+>    {
+>      "permissions": { ... existing ... },
+>      "env": { "POSTMAN_API_KEY": "PMAK-your-key-here" }
+>    }
+>    ```
+>
+>    **(b) Global (one-time-per-machine)** — `~/.claude/settings.json`. Shared across every project on this laptop.
 >    ```json
 >    "env": { "POSTMAN_API_KEY": "PMAK-your-key-here" }
 >    ```
->    Also ensure `"postman@claude-plugins-official": true` is in `enabledPlugins`.
-> 3. Restart Claude Code, then re-run `/qa-api-test-setup`.
+>
+>    Local wins if both are set (Claude Code's settings cascade auto-merges).
+>
+> 3. Either way, ensure `"postman@claude-plugins-official": true` is in `enabledPlugins` in `~/.claude/settings.json`.
+> 4. Restart Claude Code, then re-run `/qa-api-test-setup`.
 
 Stop until the user confirms it's working.
 
@@ -157,8 +175,8 @@ Ask the user for everything below, one logical group at a time:
 
 1. **Project name** (for collection name + filenames, e.g. `MyProject`)
 2. **API base URL** (e.g. `https://api.example.com`)
-3. **OpenAPI spec source** — ask: "Do you have a URL for the API docs (Swagger/Confluence), or a local JSON/YAML file path?"
-   - URL preferred. Fetch and validate.
+3. **OpenAPI spec source** — ask: "Do you have a URL for the API docs (Swagger, Scalar, Redoc, Confluence), or a local JSON/YAML file path?"
+   - URL preferred. Fetch and validate (see Phase 2 for Scalar/HTML auto-discovery).
    - File path is the fallback.
 4. **Health check path** — a reachable endpoint for run-tests.sh to ping (e.g. `/api/v1/health`). If the user is unsure, suggest the simplest GET endpoint from the spec.
 5. **Login credentials** — email + password (only needed if the spec has any JWT-protected endpoints; auto-detected in 1d).
@@ -253,7 +271,45 @@ If live verification cannot run (no creds, server unreachable), skip it and warn
 
 ## Phase 2 — Read the OpenAPI spec
 
-Read the JSON/YAML the user pointed to. Extract:
+### 2a — Load the spec (with Scalar / HTML auto-discovery)
+
+The source from Phase 1c step 3 is either a URL or a local file path. Resolve it to a parseable OpenAPI JSON/YAML document using this fallback chain:
+
+1. **Local file path** → read directly with `Read`. Done.
+2. **URL returning JSON or YAML** → fetch with `curl -s` and parse. Done.
+3. **URL returning HTML** (Scalar / Swagger UI / Redoc reference page) → fetch the HTML and try, in order:
+   - Look for a Scalar embed: `<script id="api-reference" data-url="..."` → fetch that URL.
+   - Look for an inline Scalar spec: `<script id="api-reference" type="application/json">…</script>` → parse the inline content.
+   - Look for a Redoc embed: `<redoc spec-url="..."></redoc>` → fetch that URL.
+   - Look for a Swagger UI config: `url: "..."` or `urls: [{ url: "..." }]` inside `<script>` blocks → fetch.
+   - Try common conventional paths against the URL's origin: `/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`. Stop at the first one that parses as OpenAPI.
+4. **If all auto-discovery fails** → ask the user once: `This looks like a Scalar/Swagger UI page but I could not locate the underlying OpenAPI JSON. Paste the raw spec URL (or a local file path).` Use their answer and retry from step 1.
+
+Validate the loaded document parses as OpenAPI (has `openapi:` or `swagger:` top-level key + a `paths:` object). If it does not parse → stop and show the parse error.
+
+### 2b — Mandatory endpoint count print
+
+Before anything else, count every `(method, path)` pair in `paths.*` (skip `parameters`, `summary`, `description` at path level — only count actual HTTP verb keys: `get`, `post`, `put`, `patch`, `delete`, `head`, `options`, `trace`). Print this block to the user — it is mandatory and cannot be skipped:
+
+```
+✓ OpenAPI spec loaded
+  Source:          <original URL or file path>
+  Resolved spec:   <derived JSON URL if Scalar/HTML, else "same as source">
+  OpenAPI version: <openapi/swagger version>
+  Total endpoints: <N>
+  Modules (tags):  <M>
+    00. <Tag1> (<count>)
+    01. <Tag2> (<count>)
+    ...
+    (untagged: <count>)
+  Auth schemes:    <comma-separated from components.securitySchemes>
+```
+
+**Hard stop if `Total endpoints = 0`** — print: `Spec parsed but no endpoints found. The source is likely wrong or the paths object is empty. Aborting.` and exit.
+
+### 2c — Extract details
+
+Now extract for planning:
 
 - All **endpoints grouped by tag** (each tag = a module/folder)
 - Per endpoint: method, path, summary, required body fields, query params, response schema
@@ -287,6 +343,11 @@ Decide the structure using the **nested module / test-type pattern**:
 
 ```
 <ProjectName> API — Automated Tests
+├── Happy Path - All Endpoints
+│   ├── POST /auth/login
+│   ├── GET  /orders
+│   ├── POST /orders
+│   └── ... one valid-data request per endpoint in the spec
 ├── 00. <Module1>
 │   ├── Positive
 │   │   ├── TC01: <happy path> (200)
@@ -304,10 +365,11 @@ Decide the structure using the **nested module / test-type pattern**:
 
 ### Rules
 
-- **Top-level folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded order in the spec. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
-- **Sub-folders** = always two: `Positive` and `Negative`. Always create both, even if one starts with a single test.
-- **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05).
-- **Minimum coverage per endpoint** = at least one happy path AND at least one auth-failure negative (no auth → 401). Add more negatives where the spec or context warrants:
+- **Happy Path - All Endpoints** is a top-level folder, always created first, alongside (not replacing) the module folders. It contains exactly one valid-data request per `(method, path)` in the spec — no negatives. Purpose: a fast smoke pass across the entire API in one folder. See Phase 5b/5c for build details.
+- **Top-level module folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded order in the spec. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
+- **Sub-folders** = always two under each module: `Positive` and `Negative`. Always create both, even if one starts with a single test.
+- **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<METHOD> <path>`.
+- **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND at least one auth-failure negative (no auth → 401) in its module's `Negative`. Add more negatives where the spec or context warrants:
   - Validation failure (missing required field → 400)
   - Not found (non-existent ID → 404)
   - Conflict (duplicate where applicable → 409)
@@ -319,7 +381,14 @@ Decide the structure using the **nested module / test-type pattern**:
 ```
 Plan for <ProjectName> API
 
-Modules detected from spec tags: <N>
+Total endpoints in spec: <N>
+Modules detected from spec tags: <M>
+
+Happy Path - All Endpoints (<N>):
+  POST /auth/login
+  GET  /orders
+  POST /orders
+  ...
 
 00. <Module1>
   Positive (<N>):
@@ -337,10 +406,11 @@ Modules detected from spec tags: <N>
 
 ...
 
-Total folders: <N>  (modules × 2 sub-folders each)
-Total requests: <N>
+Total folders: 1 (Happy Path) + <M> modules × 2 sub-folders each = <T>
+Total requests: <N> (Happy Path) + <N> (module Positive + Negative) = <T>
 
 Variable-setting requests:
+  - Happy Path > POST /auth/login → sets accessToken, refreshToken
   - 00. <Module1> > Positive > TC01: Login → sets accessToken, refreshToken
   - 02. <Module3> > Positive > TC01: Create Product → sets testProductId
   - ...
@@ -367,7 +437,13 @@ Ask:
 
 Save the returned collection ID.
 
-### 5b — Create folders (two levels deep)
+### 5b — Create folders
+
+**Step 1 — Happy Path - All Endpoints (created first, top-level):**
+
+Call `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `Happy Path - All Endpoints` and no `parentFolderId`. Save the returned ID as `happyPathFolderId`. This is the first folder so it sits at the top of the collection.
+
+**Step 2 — Module folders (two levels deep):**
 
 For each module from Phase 4's plan:
 
@@ -378,6 +454,7 @@ For each module from Phase 4's plan:
 After all folders are created, you should have a map like:
 ```
 {
+  "Happy Path - All Endpoints": "<happyPathFolderId>",
   "00. Module1": {
     moduleFolderId:   "...",
     positiveFolderId: "...",
@@ -390,6 +467,27 @@ After all folders are created, you should have a map like:
 ```
 
 ### 5c — Create requests
+
+Build in two passes.
+
+**Pass 1 — Happy Path - All Endpoints (build first):**
+
+For every `(method, path)` in the spec, create one request via `mcp__plugin_postman_postman__createCollectionRequest`:
+- `folderId`: `happyPathFolderId`
+- `name`: `<METHOD> <path>` exactly (e.g. `POST /auth/login`, `GET /orders/{id}`). No `HP` prefix, no `TC` prefix, no status suffix.
+- `method`, `url` from spec — host as `{{baseUrl}}`. Path params like `{id}` resolve to chained variables like `{{testOrderId}}` if a prior request creates that entity; otherwise leave as-is for the user to wire up.
+- `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and set `auth.type = "noauth"`
+- `body`: realistic valid data drawn from the spec schema + examples. Use `{{$timestamp}}` for unique fields.
+- `events` test script — **status-only assertion**:
+  ```js
+  pm.test('Status is 2xx', () => {
+    pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);
+  });
+  ```
+  No deep schema checks — that's what the per-module Positive folder is for. Happy Path is the smoke pass.
+- **Variable chaining still applies**: if the endpoint is the login or creates an entity, include the same `pm.collectionVariables.set(...)` block as Pass 2 below so downstream Happy Path requests can use the IDs/tokens. The login endpoint MUST appear first in Happy Path (reorder if needed) so `accessToken` is set before any other request runs.
+
+**Pass 2 — Module Positive / Negative requests:**
 
 For each request in each module folder, route it to the correct sub-folder by test type. Use `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: the **sub-folder** ID (`<module>PositiveFolderId` or `<module>NegativeFolderId`), NOT the module folder ID
@@ -429,7 +527,7 @@ For each request in each module folder, route it to the correct sub-folder by te
 ### 6a — Export collection locally
 
 ```bash
-POSTMAN_API_KEY="<from ~/.claude/settings.json>"
+POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<project-dir>/<project-slug>-collection.json"
@@ -528,7 +626,7 @@ For each failed request:
 ### 8b — Re-export local collection JSON after each patch
 
 ```bash
-POSTMAN_API_KEY="<from ~/.claude/settings.json>"
+POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<project-slug>-collection.json"
@@ -772,7 +870,7 @@ Some "failures" are the test correctly catching a known limitation:
 - **ID chaining** — List requests save first item's ID; Get/Update/Delete use `{{testEntityId}}`
 - **Never `const` at test script top scope** — use `let`
 - **API-key endpoints** — set `auth.type = "noauth"` + manual `Authorization: ApiKey {{platformApiKey}}` header to override collection-level bearer auth
-- **Never write `POSTMAN_API_KEY` to project `.env`** — it lives in `~/.claude/settings.json` only
+- **Never write `POSTMAN_API_KEY` to project `.env`** — it lives in `.claude/settings.local.json` (project-local, gitignored) or `~/.claude/settings.json` (global). Local wins if both set.
 - **Never write workspace ID to `.env`** — always list fresh
 - **Never `--bail` the Newman run** — initial run + auto-fix iterations must complete fully so the HTML report captures every failure in one pass. `--bail` is reserved for human-driven single-bug triage in Phase 11e.
 - **Cloud + local JSON stay in sync** — every Postman MCP `updateCollectionRequest` call must be immediately followed by re-exporting the local `<project-slug>-collection.json` (the curl in Phase 8b). Otherwise Newman re-runs the old state and your patches do nothing.

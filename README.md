@@ -26,6 +26,13 @@ All three pieces are slash commands that live in `.claude/commands/` and are inv
 
 ### Day 1: First-time setup
 
+Before running anything, make sure your Postman API key is reachable. **Two options — pick one** (see the [`.env` keys section](#env-keys) for full detail):
+
+- **Project-local (recommended for cloners):** `cp .claude/settings.local.json.example .claude/settings.local.json` and paste your `PMAK-...` key into it. Gitignored.
+- **Global:** add `"env": { "POSTMAN_API_KEY": "PMAK-..." }` to `~/.claude/settings.json`. One-time per machine.
+
+If both are set, the local file wins.
+
 Inside the project directory, run:
 ```
 /qa-api-test-setup
@@ -35,11 +42,12 @@ It will:
 1. Verify the Postman, Atlassian, and Newman plugins are connected.
 2. Read your `.env` (or create one if missing).
 3. Ask for missing pieces: project name, OpenAPI spec source, auth type, login credentials, Postman workspace.
-4. Read the OpenAPI spec, plan the collection structure, ask you to confirm.
-5. Build the main Postman collection with folders per module and happy + negative tests per endpoint.
-6. Export the collection JSON locally.
-7. Create `newman-env.json` and `run-tests.sh`.
-8. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
+4. Read the OpenAPI spec — accepts raw OpenAPI JSON/YAML URLs **or Scalar / Swagger UI / Redoc reference pages** (auto-discovers the underlying spec). After loading, prints a mandatory summary block: source, OpenAPI version, **total endpoint count**, per-tag module counts, auth schemes.
+5. Plan the collection structure, ask you to confirm.
+6. Build the main Postman collection: a top-level `Happy Path - All Endpoints` smoke folder plus one folder per module with `Positive` + `Negative` sub-folders.
+7. Export the collection JSON locally.
+8. Create `newman-env.json` and `run-tests.sh`.
+9. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
 
 ### Day 2 onwards: Spec stays in sync automatically
 
@@ -48,7 +56,7 @@ Schedule the daily sync once (see the Scheduling section below):
 /schedule daily at 2:30 PM BDT /qa-api-sync
 ```
 
-From this point on, the agent runs every day at 2:30 PM Bangladesh time and keeps your main collection up to date with whatever the dev team ships.
+From this point on, the agent runs every day at 2:30 PM Bangladesh time and keeps your main collection up to date with whatever the dev team ships. Like the setup command, it auto-discovers the spec from Scalar/Swagger UI/Redoc pages if needed and prints the mandatory endpoint-count block (including delta vs the snapshot) before applying any changes.
 
 ### When a new Jira ticket lands
 
@@ -61,7 +69,7 @@ It will:
 1. Run `/qa-api-sync` first to make sure the spec is current.
 2. Pull the ticket from Jira (or accept pasted content if Atlassian plugin is not connected).
 3. Hard-stop if any credentials it needs are not in `.env`, and ask you to provide them.
-4. Plan a Setup / Positive / Negative folder structure.
+4. Plan a Setup / Happy Path - All Endpoints / Positive / Negative folder structure.
 5. Build a standalone collection named `PROJ-123: <feature name>` in the same workspace.
 6. Run Newman, produce an HTML report.
 
@@ -109,10 +117,15 @@ Outputs:
 
 ### Main-collection folder structure
 
-The main collection uses a **module-grouped + Positive/Negative sub-folder** layout. Module folders come from the OpenAPI spec's `tags` field - whatever the dev team tagged endpoints with becomes a top-level folder.
+The main collection has a top-level **`Happy Path - All Endpoints`** folder (a quick smoke pass across every spec endpoint with valid data) followed by **module-grouped + Positive/Negative** folders. Module names come from the OpenAPI spec's `tags` field - whatever the dev team tagged endpoints with becomes a top-level folder.
 
 ```
 <ProjectName> API — Automated Tests
+├── Happy Path - All Endpoints     # runs first; one valid-data request per endpoint
+│   ├── POST /auth/login
+│   ├── GET  /orders
+│   ├── POST /orders
+│   └── ...                          # named <METHOD> <path>, status-only assertions
 ├── 00. <Module1>           # name comes from OpenAPI tag
 │   ├── Positive
 │   │   ├── TC01: <happy path> (200)
@@ -133,13 +146,14 @@ The main collection uses a **module-grouped + Positive/Negative sub-folder** lay
 ```
 
 Key properties:
+- **`Happy Path - All Endpoints`** is a fast smoke pass. One valid-data request per `(method, path)`, named `<METHOD> <path>` exactly. Status-only assertion (`2xx`). Login goes here too (first request) so `accessToken` is populated for the rest of the folder. This folder is in addition to — not replacing — the module folders.
 - Module names are NOT hardcoded - they come from your OpenAPI spec's `tags`. For an e-commerce API you might see `Products`, `Orders`, `Customers`. For a CMS API: `Content`, `Users`, `Media`. The agent reads the spec and uses what's there.
 - If the spec has no tags, the agent asks you how to group endpoints.
-- **TC numbering resets per module.** Each module starts at TC01. Numbers are continuous across Positive → Negative within a module (e.g. Positive ends at TC04, Negative starts at TC05).
-- **Every endpoint gets at least one negative test** (no-auth → 401). Additional negatives (400/404/409/422) added where the spec or context warrants.
-- **Both sub-folders always exist**, even if one starts with a single test - keeps the structure visually consistent across modules.
+- **TC numbering resets per module.** Each module starts at TC01. Numbers are continuous across Positive → Negative within a module (e.g. Positive ends at TC04, Negative starts at TC05). Happy Path requests are not TC-numbered.
+- **Every endpoint gets at least one negative test** (no-auth → 401) in its module's Negative sub-folder. Additional negatives (400/404/409/422) added where the spec or context warrants.
+- **Both sub-folders always exist** per module, even if one starts with a single test - keeps the structure visually consistent across modules.
 
-Compare with ticket collections (`/qa-test-ticket`), which use a flat **Setup / Positive / Negative** layout without module sub-grouping (because each ticket is scoped to one feature).
+Compare with ticket collections (`/qa-test-ticket`), which use a flat **Setup / Happy Path / Positive / Negative** layout scoped to one ticket's endpoints.
 
 ### `/qa-test-ticket <JIRA-KEY>`
 
@@ -175,7 +189,7 @@ Per-ticket collection. Invocation example: `/qa-test-ticket PROJ-123`.
 
 ### Ticket-collection folder structure
 
-Every ticket collection is a **standalone, flat three-folder collection** - no module sub-grouping, because one ticket is scoped to one feature. Sub-grouping by endpoint would only add noise.
+Every ticket collection is a **standalone, flat four-folder collection** - no module sub-grouping, because one ticket is scoped to one feature. Sub-grouping by endpoint would only add noise.
 
 ```
 <KEY>: <feature name>                # e.g. PROJ-123: Order Submission Flow
@@ -184,6 +198,10 @@ Every ticket collection is a **standalone, flat three-folder collection** - no m
 │   ├── 2. Fetch <Entity> ID
 │   ├── 3. Create <Entity>
 │   └── ...                           # scaled to whatever the ticket needs
+├── Happy Path - All Endpoints       # scoped to the endpoints this ticket touches
+│   ├── POST /api/v1/orders
+│   ├── GET  /api/v1/orders/{id}
+│   └── ...                           # named <METHOD> <path>, status-only assertions
 ├── Positive
 │   ├── TC01: <happy-path AC scenario> (200/201)
 │   ├── TC02: <next AC scenario> (200)
@@ -200,13 +218,14 @@ Every ticket collection is a **standalone, flat three-folder collection** - no m
 Key properties:
 - **Standalone collection, not a fork** of the main one. Lives independently in Postman.
 - **Named `<KEY>: <feature name>`** (e.g. `PROJ-123: Order Submission Flow`).
-- **Flat three folders only**: `Setup`, `Positive`, `Negative`. No module sub-folders.
+- **Flat four folders only, in run order**: `Setup`, `Happy Path - All Endpoints`, `Positive`, `Negative`. No module sub-folders.
+- **Happy Path - All Endpoints** is scoped to only the endpoints this ticket touches — one valid-data request per `(method, path)`, named `<METHOD> <path>` exactly, status-only assertions. Variable chaining (`pm.environment.set`) stays in Setup; Happy Path doesn't set vars.
 - **Setup is sized to the ticket** - a simple ticket may have 1-3 setup items; a complex feature may need 20+ (login → fetch existing IDs → create prerequisite entities → build state).
-- **Continuous TC numbering** across `Positive` then `Negative` (no reset). E.g. Positive ends at TC04, Negative starts at TC05.
+- **Continuous TC numbering** across `Positive` then `Negative` (no reset). E.g. Positive ends at TC04, Negative starts at TC05. Happy Path requests are not TC-numbered.
 - **Full auth-matrix on every endpoint** in Negative: no auth, expired token, tampered token, malformed token.
 - **Verification suffixes** (`TC02b`, `TC02c`) for follow-up checks tied to a primary case.
 
-Compare with the **main collection** (`/qa-api-test-setup`), which uses a deeper `Module → Positive/Negative` structure because it covers every endpoint across every module of the API.
+Compare with the **main collection** (`/qa-api-test-setup`), which uses a `Happy Path - All Endpoints + Module → Positive/Negative` structure because it covers every endpoint across every module of the API.
 
 Credential gate: if the ticket needs any creds, IDs, or test data not in `.env`, the agent stops and asks you to provide them. It suggests asking the dev team, checking API docs, or checking the linked Confluence page.
 
@@ -467,13 +486,42 @@ LOGIN_PATH=/api/v1/auth/login
 TOKEN_JSON_PATH=payload.data.tokens.accessToken
 ```
 
-The Postman API key (`PMAK-...`) does NOT live in `.env`. It lives in your **global Claude Code config** at `~/.claude/settings.json` (the user-level `.claude/` directory in your home folder, NOT the project-local `.claude/` in this repo) under the `env.POSTMAN_API_KEY` field. This is because it is a Claude Code plugin credential reused across every project on your machine - putting it in a project `.env` would mean re-pasting it for every new repo.
+The Postman API key (`PMAK-...`) does NOT live in `.env`. It lives under `env.POSTMAN_API_KEY` in a Claude Code settings file. **Two valid locations — pick one:**
 
-To make the distinction concrete:
-- **Global**: `~/.claude/settings.json` (i.e. `/Users/<your-username>/.claude/settings.json` on macOS, `/home/<your-username>/.claude/settings.json` on Linux, `C:\Users\<your-username>\.claude\settings.json` on Windows). Lives in your home directory, shared across every project on your machine. Holds plugin credentials, global settings, and per-user defaults.
-- **Project-local**: `<project-root>/.claude/` (e.g. `/Users/<your-username>/Documents/your-project/.claude/` or wherever this repo is checked out). Lives inside this repo, shared via git with your team. Holds `commands/` (the three agents) and `templates/` (run-tests.sh + generate-issues.py blueprints) for this project specifically.
+**Option A — Project-local (recommended for cloners)**
 
-Same folder name (`.claude/`), two completely different locations and purposes.
+`<project-root>/.claude/settings.local.json` — gitignored, per-project. Best if you work with multiple Postman accounts/workspaces, or just want everything for this project in one place. The repo ships a template:
+
+```bash
+cp .claude/settings.local.json.example .claude/settings.local.json
+# then edit .claude/settings.local.json and paste your PMAK
+```
+
+If `.claude/settings.local.json` already exists in your clone (e.g. it has a `permissions` block), merge an `env` key into it rather than overwriting:
+```json
+{
+  "permissions": { ... existing ... },
+  "env": { "POSTMAN_API_KEY": "PMAK-your-key-here" }
+}
+```
+
+**Option B — Global (one-time-per-machine)**
+
+`~/.claude/settings.json` — your home-directory Claude Code config, shared across every project on your machine. Best if you use one Postman account for all QA work.
+
+```json
+{
+  "env": { "POSTMAN_API_KEY": "PMAK-your-key-here" }
+}
+```
+
+**Both at once?** Claude Code's settings cascade merges them automatically. **The local file wins if both define `POSTMAN_API_KEY`** — useful when you want a project-specific override of a global default.
+
+To make the file-location distinction concrete:
+- **Global config**: `~/.claude/settings.json` (i.e. `/Users/<your-username>/.claude/settings.json` on macOS, `/home/<your-username>/.claude/settings.json` on Linux, `C:\Users\<your-username>\.claude\settings.json` on Windows). Lives in your home directory, shared across every project on your machine.
+- **Project-local config**: `<project-root>/.claude/settings.local.json` (e.g. `/Users/<your-username>/Documents/your-project/.claude/settings.local.json`). Lives inside this repo's `.claude/` folder, gitignored. The `.claude/commands/` and `.claude/templates/` folders next to it are the committed agent + template definitions shared with your team.
+
+Same folder name (`.claude/`), two completely different scopes.
 
 ## Running tests
 

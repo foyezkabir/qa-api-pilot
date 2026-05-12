@@ -45,12 +45,40 @@ ls api-snapshot-*.json 2>/dev/null | sort -r
 
 ## Phase 1 — Fetch fresh spec
 
-Read `OPENAPI_SPEC` from `.env`. It is either a URL or a local file path.
+### 1a — Load the spec (with Scalar / HTML auto-discovery)
 
-- **URL** → fetch with `curl -s` and parse JSON/YAML
-- **File path** → read with `Read` tool
+Read `OPENAPI_SPEC` from `.env`. Resolve it to a parseable OpenAPI document using the same fallback chain as `/qa-api-test-setup` Phase 2a:
 
-Validate it's a parseable OpenAPI document. If it fails to parse → stop and tell user the spec source is broken; show the error.
+1. **Local file path** → read with `Read`.
+2. **URL returning JSON or YAML** → `curl -s` and parse.
+3. **URL returning HTML** (Scalar / Swagger UI / Redoc reference page) → fetch the HTML and try, in order:
+   - Scalar embed: `<script id="api-reference" data-url="...">` → fetch that URL.
+   - Inline Scalar spec: `<script id="api-reference" type="application/json">…</script>` → parse inline.
+   - Redoc embed: `<redoc spec-url="..."></redoc>` → fetch that URL.
+   - Swagger UI config (`url:` / `urls:[{url:}]`) inside `<script>` blocks → fetch.
+   - Conventional paths on the URL's origin: `/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`. Stop at the first one that parses.
+4. **If all auto-discovery fails** → ask the user once for the raw spec URL or local path, then retry from step 1.
+
+Validate the loaded document parses as OpenAPI (has `openapi:`/`swagger:` and a `paths:` object). If it fails to parse → stop and show the error; tell user the spec source is broken.
+
+### 1b — Mandatory endpoint count print (with delta vs snapshot)
+
+Count every `(method, path)` pair under `paths.*` (only the HTTP verb keys: `get`, `post`, `put`, `patch`, `delete`, `head`, `options`, `trace`). Also read `meta.currentTotalEndpoints` and `meta.lastSyncedAt` from the snapshot file (Phase 2b loads the snapshot — pull these values forward here, or read the snapshot file once now).
+
+Print this block — it is mandatory and cannot be skipped:
+
+```
+✓ Fresh spec loaded
+  Source:          <original URL or file path>
+  Resolved spec:   <derived JSON URL if Scalar/HTML, else "same as source">
+  Total endpoints today:      <N>
+  Total endpoints in snapshot (<snapshot date>): <M>
+  Delta vs snapshot:          <signed N - M>   (real diff buckets computed in Phase 2c)
+```
+
+**Hard stop if `Total endpoints today = 0`** — print: `Spec parsed but no endpoints found. Aborting — the source is likely wrong or temporarily empty.` and exit without touching the snapshot.
+
+The exact `+added / -removed / changed` bucket counts come from Phase 2c. The delta line above is just `today - snapshot`, useful as an early signal.
 
 ---
 
@@ -144,9 +172,16 @@ If `n` → exit without changes. If `y` → continue.
 
 ### 4a — ADDED endpoints
 
-For each new endpoint, create a request in the **main project collection** in the appropriate folder (matched by the endpoint's OpenAPI `tag`).
+For each new endpoint, create requests in the **main project collection** in two places:
 
-Use the standard test set:
+**1. The `Happy Path - All Endpoints` top-level folder**, with one valid-data request:
+- `folderId`: the `Happy Path - All Endpoints` folder ID (look it up via `mcp__plugin_postman_postman__getCollection`)
+- `name`: `<METHOD> <path>` exactly (e.g. `POST /api/v1/orders/cancel`)
+- Body: valid data from the spec. Use `{{$timestamp}}` for unique fields.
+- Test: status-only — `pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);`
+- If the added endpoint is a login or creates an entity, include the same variable-set block (`pm.collectionVariables.set('accessToken'/'test<Entity>Id', ...)`) so downstream Happy Path requests can chain.
+
+**2. The appropriate module folder** (matched by the endpoint's OpenAPI `tag`), with the standard module-level test set:
 
 | Test type | Always or conditional | Purpose |
 |---|---|---|
@@ -159,31 +194,31 @@ Use the standard test set:
 
 Test script style follows `/qa-api-test-setup` Phase 5c rules (let-only, status-first assertion, `{{$timestamp}}` for unique fields, `pm.collectionVariables.set` for chaining in the main collection).
 
-Use `mcp__plugin_postman_postman__createCollectionRequest`.
+Use `mcp__plugin_postman_postman__createCollectionRequest` for both folders.
 
 ### 4b — CHANGED endpoints
 
 For each changed endpoint:
 
-1. Find the existing request(s) in the main collection at that `(method, path)` — could be more than one (happy + negative variants)
+1. Find the existing request(s) in the main collection at that `(method, path)` — there will typically be multiple matches across folders (one in `Happy Path - All Endpoints`, plus the module's `Positive` happy path, plus one or more `Negative` variants).
 2. For each matching request, update the request **body and params** to match the new schema. **Do not touch the test scripts** — those are hand-tuned and must be preserved.
 3. Use `mcp__plugin_postman_postman__updateCollectionRequest`.
-4. Print before/after for the user.
+4. Print before/after for the user, noting which folders were touched.
 
 ### 4c — REMOVED endpoints
 
 For each removed endpoint:
 
-1. Find requests in the main collection at that `(method, path)`
-2. Rename them to `[DEPRECATED] <original name>` via `updateCollectionRequest`
-3. Do **not** delete — preserves history in case the endpoint comes back or you need to reference the old test data
+1. Find requests in the main collection at that `(method, path)` — including the entry in `Happy Path - All Endpoints` AND all module-folder variants.
+2. Rename them to `[DEPRECATED] <original name>` via `updateCollectionRequest` (so the Happy Path entry becomes `[DEPRECATED] <METHOD> <path>`).
+3. Do **not** delete — preserves history in case the endpoint comes back or you need to reference the old test data.
 
 ### 4d — Ticket-collection refresh
 
 For each ticket collection flagged in Phase 2d:
 
-- For **changed** endpoints used by the ticket collection → update its request body/params (same rule as 4b: body yes, test scripts no)
-- For **removed** endpoints → rename to `[DEPRECATED]`
+- For **changed** endpoints used by the ticket collection → update its request body/params in **all** folders where it appears (`Happy Path - All Endpoints`, `Positive`, `Negative`). Same rule as 4b: body yes, test scripts no.
+- For **removed** endpoints → rename to `[DEPRECATED] <original name>` in every folder where they appear.
 
 Print which ticket collections were touched.
 
@@ -192,7 +227,7 @@ Print which ticket collections were touched.
 ## Phase 5 — Re-export main collection
 
 ```bash
-POSTMAN_API_KEY="<from ~/.claude/settings.json>"
+POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<project-slug>-collection.json"

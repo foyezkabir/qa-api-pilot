@@ -34,7 +34,7 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 
 - **Required runtime keys**: `BASE_URL`, `OPENAPI_SPEC`, `HEALTH_PATH`, `LOGIN_EMAIL`, `LOGIN_PASSWORD`, `PLATFORM_API_KEY` (if apiKey auth), `JIRA_PROJECT_KEY` (auto-populated on first ticket).
 - **Auto-detected (NOT in `.env` by default)**: `AUTH_TYPE`, `LOGIN_PATH`, `TOKEN_JSON_PATH` are derived from the OpenAPI spec during `/qa-api-test-setup` Phase 1d. The detected values are baked into the generated collection. They only appear in `.env` if the user manually overrode them when the spec was wrong or incomplete.
-- **`POSTMAN_API_KEY` (PMAK-...) lives in the GLOBAL Claude Code config (`~/.claude/settings.json` in the user's home directory, NOT in the project-local `.claude/` folder), under `env.POSTMAN_API_KEY`. NEVER in project `.env`.** It is a Claude Code plugin credential shared across every project on the user's machine. The two `.claude/` directories are different scopes - global (`~/.claude/`) holds plugin credentials and global settings; project-local (`<project>/.claude/`) holds the agents and templates for this specific project.
+- **`POSTMAN_API_KEY` (PMAK-...) lives under `env.POSTMAN_API_KEY` in either `.claude/settings.local.json` (project-local, gitignored) OR `~/.claude/settings.json` (global, user-wide). NEVER in project `.env`.** Both are valid; pick one per machine/project. Claude Code's settings cascade auto-merges them, with **local winning if both are set**. Local is recommended for fresh cloners (matches the `.env` mental model, gitignored, per-project key possible); global is the one-time-per-machine option for users with a single Postman account across projects. A `.claude/settings.local.json.example` ships with the repo — cloners copy it to `.claude/settings.local.json` and paste their PMAK. The two `.claude/` directories are different scopes: global (`~/.claude/`) holds user-wide settings; project-local (`<project>/.claude/`) holds project agents, templates, and (optionally) project-local credentials.
 - **Workspace IDs are NEVER stored in `.env`.** Always list workspaces fresh via `getWorkspaces` and let the user pick.
 - **One-off entity IDs do NOT go in `.env`.** Only persistent credentials and API keys.
 - **`JIRA_PROJECT_KEY` is auto-extracted** from the first `/qa-test-ticket <KEY>` call (e.g. `PROJ-123` → `PROJ`) and saved automatically to `.env`. Used by the bug-logging gate.
@@ -45,12 +45,29 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 - **Ticket-scoped collections use `pm.environment.set(...)`** for variable chaining, not `pm.collectionVariables.set(...)`. The main project-level collection uses `pm.collectionVariables`. Do not mix the two scopes within one collection.
 - **Use `{{$timestamp}}` for unique fields** (email, codes, names) to prevent 409 conflicts on re-run.
 
+### Spec sources
+
+- **Accept Scalar / Swagger UI / Redoc reference pages as spec sources, not just raw OpenAPI JSON/YAML.** When the user provides a URL that returns HTML, both `/qa-api-test-setup` (Phase 2a) and `/qa-api-sync` (Phase 1a) must auto-discover the underlying spec by looking at: Scalar embed (`<script id="api-reference" data-url="...">`), inline Scalar (`<script id="api-reference" type="application/json">`), Redoc embed (`<redoc spec-url="...">`), Swagger UI config (`url:`/`urls:` inside script blocks), and conventional paths (`/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`). If discovery fails, ask the user once for the raw spec URL.
+- **Mandatory endpoint count print after loading any spec.** After a successful spec load in `/qa-api-test-setup` Phase 2b and `/qa-api-sync` Phase 1b, print a fixed summary block to the user (source, resolved spec URL, OpenAPI version, total endpoints, per-tag module counts, auth schemes — and for sync, delta vs snapshot). This is non-skippable. **Hard stop if total endpoints = 0.**
+
+### Happy Path folder
+
+- **`Happy Path - All Endpoints`** is the first top-level folder in every collection (main and ticket). It holds exactly one valid-data request per `(method, path)` in scope.
+- **Naming**: `<METHOD> <path>` exactly. No `HP` prefix, no `TC` prefix, no status suffix. Example: `POST /api/v1/orders`.
+- **Test scripts**: status-only assertion (`pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204])`). No deep schema checks — those live in module Positive folders.
+- **Variable chaining**: in the main collection, the login request in Happy Path also sets `accessToken` (so it must be the first Happy Path request). In ticket collections, variable chaining stays in Setup — Happy Path doesn't `pm.environment.set(...)`.
+- **Endpoint coverage rule**: every spec endpoint must appear in Happy Path AND in its module's Positive (main collection) or in the ticket's Positive (ticket collection). Happy Path is the smoke pass; Positive is the assertion-rich pass.
+
 ## Collection structures (two different shapes)
 
-**Main collection** (`/qa-api-test-setup`) - module-grouped, two levels deep:
+**Main collection** (`/qa-api-test-setup`) - Happy Path folder + module-grouped Positive/Negative:
 
 ```
 <ProjectName> API — Automated Tests
+├── Happy Path - All Endpoints           ← top-level, runs first
+│   ├── POST /auth/login
+│   ├── GET  /orders
+│   └── ... one valid-data request per (method, path)
 ├── 00. <ModuleFromSpecTag>
 │   ├── Positive
 │   │   └── TC01: ... (200)
@@ -61,22 +78,26 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
     └── Negative
 ```
 
+- `Happy Path - All Endpoints` sits **alongside** the module folders (not replacing them). It contains one valid-data request per spec endpoint, named `<METHOD> <path>` exactly (no `HP`/`TC` prefix, no status suffix). Status-only assertions. Login goes here too (first request) so `accessToken` is set before downstream Happy Path calls.
 - Module names come from OpenAPI spec `tags` (never hardcoded).
-- TC numbering **resets per module**; continuous across Positive → Negative within one module.
+- TC numbering **resets per module**; continuous across Positive → Negative within one module. Happy Path requests are not TC-numbered.
 - Both sub-folders always exist per module, even if one has a single test.
-- Every endpoint gets at least one no-auth → 401 negative.
+- Every endpoint gets: one entry in Happy Path + at least one happy path in its module's Positive + at least one no-auth → 401 negative.
 
-**Ticket collection** (`/qa-test-ticket`) - flat, three folders:
+**Ticket collection** (`/qa-test-ticket`) - flat, four folders:
 
 ```
 <KEY>: <feature name>
 ├── Setup
+├── Happy Path - All Endpoints           ← scoped to ticket's endpoints
 ├── Positive
 └── Negative
 ```
 
 - No module sub-grouping (one ticket = one feature).
-- Continuous TC numbering across Positive → Negative (no reset).
+- `Happy Path - All Endpoints` here is scoped to only the endpoints the ticket touches. Same naming rule: `<METHOD> <path>` exactly. Status-only assertions. Variable chaining (`pm.environment.set`) stays in Setup — Happy Path doesn't set vars.
+- Folder order in the collection: Setup → Happy Path → Positive → Negative (matches run order).
+- Continuous TC numbering across Positive → Negative (no reset). Happy Path requests are not TC-numbered.
 - Full auth-matrix negatives (no/expired/tampered/malformed token).
 
 When building/updating collections via Postman MCP, always create the sub-folders explicitly via `createCollectionFolder` with `parentFolderId` set. Do not route requests directly under module folders for the main collection - they must go into the `Positive` or `Negative` sub-folder.
