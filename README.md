@@ -1,6 +1,6 @@
 # QA API Pilot
 
-A reusable automated API testing setup for any REST API project, built on Postman + Newman and driven by three custom Claude Code agents. Drop this into any repo, run the setup command, and you have a working test suite. The agents adapt to whatever OpenAPI spec, base URL, and credentials you give them - nothing is hardcoded to a specific project.
+A reusable scaffold for setting up automated API testing on any REST API, built on Postman + Newman and driven by three custom Claude Code agents. Clone it as the starting point for a new QA project, run the setup command, and you have a working test suite. The agents adapt to whatever OpenAPI spec, base URL, and credentials you give them — nothing is hardcoded to a specific project.
 
 ## What this is
 
