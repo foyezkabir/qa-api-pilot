@@ -12,13 +12,14 @@ A self-contained QA workflow that:
 
 All three pieces are slash commands that live in `.claude/commands/` and are invoked from inside Claude Code.
 
-## The three agents
+## The agents
 
 | Command | Purpose | When to run |
 |---|---|---|
 | `/qa-api-test-setup` | First-time project setup. Builds the main collection from scratch. | Once, when starting on a new API project. |
 | `/qa-test-ticket <JIRA-KEY>` | Builds a per-ticket test collection (e.g. PROJ-123). | Every time a new Jira ticket needs scoped tests. |
 | `/qa-api-sync` | Detects spec drift, updates collections, refreshes snapshot. | Daily (via `/schedule`), before every ticket build (auto), or manually. |
+| `/qa-negative-audit` | Walks every endpoint, evaluates the negative matrix, reports gaps, optionally fills them in module-wise batches with a resume checkpoint. | On-demand: after big sync changes, periodically to catch hand-edit drift, or anytime you want a coverage health check. |
 
 ---
 
@@ -49,6 +50,8 @@ It will:
 8. Export the collection JSON locally.
 9. Create `newman-env.json` and `run-tests.sh`.
 10. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
+
+**About the negative coverage approach.** The setup applies a **24-row negative test matrix** (`.claude/commands/qa-negative-matrix.md`) to every endpoint — not just the basic "no-auth + missing-field + 404" trio. The matrix covers Auth (no/expired/tampered/malformed token, wrong-role), Validation (missing required, wrong type, out-of-range, regex mismatch, enum out-of-range), Resource (not-found, wrong-state, conflict), and Security (SQL injection, XSS reflection, path traversal, CORS, optional rate-limit). Plus cross-cutting assertions (response time, schema validation, sensitive-data leak, error body structure, no stack trace, idempotency) added INTO every test. The agent walks every matrix row per endpoint and either generates the test or marks it `n/a (condition not met)` — nothing is mentally skipped. Rate-limit tests are destructive and opt-in via `INCLUDE_RATE_LIMIT_TESTS=true` in `.env` (default `false`, asked once during setup). For big projects, builds happen module-wise with a continue prompt every module if `>20` endpoints total.
 
 ### Day 2 onwards: Spec stays in sync automatically
 
@@ -263,6 +266,31 @@ Invocation modes:
 - Manual: `/qa-api-sync`
 - Scheduled (runs even when Claude Code is closed): `/schedule daily at 2:30 PM BDT /qa-api-sync`
 - Auto-called as Phase 0 of `/qa-test-ticket <KEY>`
+
+### `/qa-negative-audit`
+
+The on-demand **coverage health check**. Sync watches for spec drift; audit watches for *coverage* drift — the gap between what you have and what the negative matrix says you should have. Run when:
+- A sync brought in many new endpoints and you want to confirm their matrices were fully generated.
+- Teammates have been hand-editing collections and you suspect tests got removed or skipped.
+- You want a periodic (weekly / monthly) coverage report.
+- You're seeing the suggestion `Run /qa-negative-audit to close coverage gaps?` at the end of a sync.
+
+What it does:
+- Walks every endpoint in the spec.
+- Evaluates every row of the negative matrix (`.claude/commands/qa-negative-matrix.md`) against the endpoint's spec shape.
+- Cross-references against the actual tests in the collection.
+- Prints a coverage report per endpoint and per module: `✓ covered (TC<NN>)`, `✗ missing`, `n/a (condition not met)`, `skipped (env flag)`.
+- Offers to fill the gaps in **module-wise batches**. Each module is a checkpoint — interrupt with Ctrl+C and the next `/qa-negative-audit` resumes from the checkpoint file (`.audit-progress.json`).
+
+Flags:
+- `(no flag)` — default audit + fill flow
+- `--report-only` — just print the gap report, change nothing
+- `set` — fill one module's gaps, then stop and ask
+- `--verbose` — show every row including covered + n/a
+- `--reorganize` — one-shot pass that moves loose tests at the root of `Negative` into the 4-way sub-folders (only needed for older collections built before the matrix existed)
+- `--include-rate-limit` — override `INCLUDE_RATE_LIMIT_TESTS=false` for one run (use with care — destructive)
+
+The audit **never modifies or deletes existing tests**. It only adds missing ones. Renumbering or removing requires explicit human action. This makes it safe to run on any collection — worst case, it does nothing because everything is already covered.
 
 ---
 

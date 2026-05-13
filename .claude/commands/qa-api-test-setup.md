@@ -152,6 +152,8 @@ Read it and print a checklist of what's present vs missing. The required keys ar
 | `LOGIN_EMAIL` | Test account email (if JWT auth) |
 | `LOGIN_PASSWORD` | Test account password (if JWT auth) |
 | `PLATFORM_API_KEY` | Platform-level API key (if API-key auth) |
+| `INCLUDE_RATE_LIMIT_TESTS` | `true`/`false`. Whether to generate destructive rate-limit probe tests. Default `false`. |
+| `RESPONSE_TIME_SLA_MS` | Per-endpoint response-time threshold for the cross-cutting assertion (default `500`) |
 | `JIRA_PROJECT_KEY` | Optional; auto-populated on first `/qa-test-ticket` call |
 
 **Auto-detected keys (NOT required in `.env`):** `AUTH_TYPE`, `LOGIN_PATH`, `TOKEN_JSON_PATH` are auto-detected from the OpenAPI spec during Phase 1d below. If the user has manually set any of these in `.env` as overrides, the override wins.
@@ -181,7 +183,15 @@ Ask the user for everything below, one logical group at a time:
 4. **Health check path** — a reachable endpoint for run-tests.sh to ping (e.g. `/api/v1/health`). If the user is unsure, suggest the simplest GET endpoint from the spec.
 5. **Login credentials** — email + password (only needed if the spec has any JWT-protected endpoints; auto-detected in 1d).
 6. **Platform API key** — only needed if the spec has any apiKey-protected endpoints; auto-detected in 1d.
-7. **Postman workspace** — call `mcp__plugin_postman_postman__getWorkspaces`, show as numbered list:
+7. **Rate-limit tests** — ask **once** with a warning, then persist to `.env` as `INCLUDE_RATE_LIMIT_TESTS=true|false` (default `false`):
+
+   > Rate-limit tests hammer each rate-limited endpoint with N rapid requests to verify it returns 429. **This is destructive** — it can trigger WAF / monitoring alerts and disrupt other testers on shared dev/staging environments. Default is OFF. Enable? (y/N)
+
+   - User answers `y` → write `INCLUDE_RATE_LIMIT_TESTS=true`.
+   - User answers `n` or just hits enter → write `INCLUDE_RATE_LIMIT_TESTS=false`.
+
+   The setting can be flipped later by editing `.env` directly. `/qa-negative-audit` honors this flag and reports rate-limit rows as `skipped (INCLUDE_RATE_LIMIT_TESTS=false)` when off so the gap stays visible.
+9. **Postman workspace** — call `mcp__plugin_postman_postman__getWorkspaces`, show as numbered list:
    ```
    Which Postman workspace should I create the collection in?
      1. My Workspace (personal)
@@ -189,7 +199,7 @@ Ask the user for everything below, one logical group at a time:
      3. Project Workspace
    ```
    User picks a number. **Do NOT save workspace ID to `.env`** — always list fresh on each run.
-8. **Confluence space key** (optional) — only if Atlassian was connected in 0b. Skip otherwise.
+10. **Confluence space key** (optional) — only if Atlassian was connected in 0b. Skip otherwise.
 
 **Do not** ask about AUTH_TYPE, LOGIN_PATH, or TOKEN_JSON_PATH. Those get auto-detected from the spec in Phase 1d.
 
@@ -450,12 +460,10 @@ Decide the structure using the **nested module / test-type pattern**:
 - **Top-level module folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded **audited flow order** from Phase 2d (NOT spec-tag order). So auth/signup modules float to `00.`/`01.`, downstream modules get later numbers. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
 - **Sub-folders** = always two under each module: `Positive` and `Negative`. Always create both, even if one starts with a single test.
 - **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<METHOD> <path>`.
-- **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND at least one auth-failure negative (no auth → 401) in its module's `Negative`. Add more negatives where the spec or context warrants:
-  - Validation failure (missing required field → 400)
-  - Not found (non-existent ID → 404)
-  - Conflict (duplicate where applicable → 409)
-  - Wrong state (state transitions where applicable → 422)
+- **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND has the **full applicable negative matrix** in its module's `Negative` sub-folders. The matrix is defined in `.claude/commands/qa-negative-matrix.md` — agents do not "decide mentally" what negatives are worth writing; they walk every matrix row, check the condition, and either write the test or mark the row as `n/a (condition not met)`. See the matrix doc for the 24 rows and their conditions. Rough averages: 4–13 negatives per endpoint depending on shape (public GETs are light, body-carrying POSTs are heavy).
+- **Negative sub-folders**: every module's `Negative` folder has 4 sub-folders, always created upfront even if empty: `Auth`, `Validation`, `Resource`, `Security`. TC numbering is continuous across all four (single counter per module).
 - **Collection variables set by certain requests** = note explicitly which Positive tests set `accessToken` (login), `test<Entity>Id` (creates), etc.
+- **Matrix-required variables** (see matrix doc Phase 4 implementation notes): `expiredAccessToken`, `tamperedAccessToken`, `altUserAccessToken`, `nonExistentId` (`00000000-0000-0000-0000-000000000000`), `RESPONSE_TIME_SLA_MS` (default 500), `INCLUDE_RATE_LIMIT_TESTS`. These all go into `newman-env.json` (Phase 6b) with defaults; the agent asks the user for `altUserAccessToken` only if a row needing it (`auth-wrong-role`) applies to any endpoint.
 
 ### Print the plan
 
@@ -550,6 +558,7 @@ Iterate `auditedModules` from Phase 2d **in order** (index 00 → 01 → …). F
 1. Create the top-level module folder via `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `<NN>. <ModuleName>` where `<NN>` is the audited index. Save the returned folder ID as `<module>ModuleFolderId`.
 2. Create the `Positive` sub-folder under it via the same MCP call but with `parentFolderId: <module>ModuleFolderId`. Save the returned ID as `<module>PositiveFolderId`.
 3. Create the `Negative` sub-folder the same way. Save ID as `<module>NegativeFolderId`.
+4. Create the **4 Negative sub-folders** under `<module>NegativeFolderId` — `Auth`, `Validation`, `Resource`, `Security` — in that order. Save the IDs as `<module>NegativeAuthFolderId`, `<module>NegativeValidationFolderId`, `<module>NegativeResourceFolderId`, `<module>NegativeSecurityFolderId`. **Always create all 4 even if some will end up empty** — the structure must be visually consistent across modules so users always know where to look.
 
 Order matters here — Postman renders folders in creation order. Creating in audited order is what gives the user a top-to-bottom-runnable collection.
 
@@ -589,16 +598,79 @@ Iterate `auditedFlow` from Phase 2d **in order**. For each entry, create one req
   No deep schema checks — that's what the per-module Positive folder is for. Happy Path is the smoke pass.
 - **Variable chaining still applies**: if the endpoint is the login or creates an entity, include the same `pm.collectionVariables.set(...)` block as Pass 2 below so downstream Happy Path requests can use the IDs/tokens. The audit from Phase 2d guarantees the login endpoint runs before any token-protected endpoint, so by the time Pass 1 reaches `GET /profile`, `{{accessToken}}` is already set.
 
-**Pass 2 — Module Positive / Negative requests:**
+**Pass 2 — Module Positive / Negative requests (matrix-driven, module-wise batching):**
 
-For each request in each module folder, route it to the correct sub-folder by test type. Use `mcp__plugin_postman_postman__createCollectionRequest`:
-- `folderId`: the **sub-folder** ID (`<module>PositiveFolderId` or `<module>NegativeFolderId`), NOT the module folder ID
+For each module in audited order, build Positive requests first, then walk the negative matrix.
+
+**Module-wise batching:** Process **one module at a time**. After each module's tests are generated, if `totalEndpoints > 20`, print progress and ask `Module <NN>. <Name> done — N tests. Continue to <NN+1>? (y/n)`. The user can stop mid-build at any module boundary; the build resumes cleanly because each module is self-contained. For modules with > 10 endpoints, additionally chunk into sub-batches of 10 endpoints (still completing the module before prompting). For projects ≤ 20 endpoints total, no prompts — straight through.
+
+**Positive (per endpoint in module):**
+
+Use `mcp__plugin_postman_postman__createCollectionRequest`:
+- `folderId`: `<module>PositiveFolderId`
 - `method`, `url` from spec — host as `{{baseUrl}}`
 - `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and set `auth.type = "noauth"`
 - `body`: realistic test data from the spec; use `{{$timestamp}}` for unique fields (email, codes, names)
-- `events` test script — follow rules below
+- `events` test script — follow rules below + cross-cutting assertions from the matrix doc (response time, schema validation, sensitive-data leak, idempotency where applicable)
 
-**Test script rules:**
+**Negative (per endpoint in module — walk every matrix row):**
+
+For each endpoint in the module, walk every row of `.claude/commands/qa-negative-matrix.md`. For each row:
+
+1. Evaluate the row's **condition** against the endpoint's spec. If the condition is false → mark `n/a` and skip (no test generated).
+2. If the condition is true → generate the test(s):
+   - `folderId`: the row's **target sub-folder** (`<module>NegativeAuthFolderId` / `<module>NegativeValidationFolderId` / `<module>NegativeResourceFolderId` / `<module>NegativeSecurityFolderId`)
+   - `name`: `TC<NN>: <resolved row name pattern>` — use the next TC number in this module's continuous counter (shared across all 4 Negative sub-folders)
+   - `method`, `url`, headers, body: copied from the endpoint's Positive happy-path, then the row's **mutation** is applied (e.g. for `auth-no-token` → remove `Authorization` header; for `val-missing-required` → omit one required field per test, generating N tests for N required fields)
+   - `events` test script: from the matrix row template
+3. If the row needs a **Setup fixture** (`res-conflict`, `res-wrong-state`, `auth-wrong-role`), ensure the dependency exists in `Positive` or as an alt-user var. Add it if missing.
+4. Add the **cross-cutting assertions** (`xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-sensitive-leak`) into the test script of every negative test.
+
+**Rate-limit row (`sec-rate-limit`)** is conditional on `INCLUDE_RATE_LIMIT_TESTS=true` in `.env`. If `false`, skip all rate-limit tests with note `skipped (INCLUDE_RATE_LIMIT_TESTS=false)` — visible in the build summary so the gap is acknowledged.
+
+After Pass 2, **print a coverage summary AND write it to a report file** before exporting:
+
+```
+Negative coverage summary:
+  Total applicable rows: <N>
+  Covered:               <N>
+  Skipped (rate-limit):  <N>
+  Coverage:              <pct>%
+```
+
+**Also write the full report to `collection-run-issues/<project-slug>-coverage-<YYYYMMDD-HHMMSS>.txt`.** Same format as `/qa-negative-audit --report-only` output:
+
+```
+Negative coverage report — <Project Name>
+Generated by: /qa-api-test-setup
+Generated at: <ISO timestamp>
+Spec source:  <URL or file>
+
+Total endpoints: <N>
+Project coverage: <pct>% (<covered>/<applicable>, <skipped> skipped)
+
+══════════════════════════════════════════════════════════════════════════
+00. Auth   (<N> endpoints, <pct>% coverage)
+──────────────────────────────────────────────────────────────────────────
+  POST /api/v1/auth/login   <N>/<M> applicable rows covered
+    ✓ auth-no-token        TC07
+    ✓ auth-expired-token   TC08
+    ...
+    ⊘ sec-rate-limit       skipped (INCLUDE_RATE_LIMIT_TESTS=false)
+    ⊘ val-regex-mismatch   n/a (no regex constraints in spec)
+  ...
+
+══════════════════════════════════════════════════════════════════════════
+
+Summary by module:
+  00. Auth        <pct>%
+  01. Users       <pct>%
+  ...
+```
+
+The file lives in the already-gitignored `collection-run-issues/` directory so it doesn't pollute the repo but is available for CI artifact upload, team sharing, or historical reference. Create the directory first if it doesn't exist (`mkdir -p collection-run-issues`).
+
+**Shared test-script rules (apply to all Positive and matrix-driven Negative tests):**
 - Assert status code first: `pm.test('Status is 200', () => pm.response.to.have.status(200));`
 - Use `let` at top scope, never `const` — Newman throws `SyntaxError: Identifier already declared`
 - Login → save tokens:
@@ -648,12 +720,26 @@ Write `<project-dir>/newman-env.json`:
     { "key": "baseUrl", "value": "<baseUrl>", "enabled": true },
     { "key": "accessToken", "value": "", "enabled": true },
     { "key": "refreshToken", "value": "", "enabled": true },
-    { "key": "platformApiKey", "value": "<apiKeyValue>", "enabled": true }
+    { "key": "platformApiKey", "value": "<apiKeyValue>", "enabled": true },
+    { "key": "expiredAccessToken", "value": "<a-known-expired-JWT>", "enabled": true },
+    { "key": "tamperedAccessToken", "value": "", "enabled": true },
+    { "key": "altUserAccessToken", "value": "", "enabled": true },
+    { "key": "nonExistentId", "value": "00000000-0000-0000-0000-000000000000", "enabled": true },
+    { "key": "RESPONSE_TIME_SLA_MS", "value": "<from .env, default 500>", "enabled": true },
+    { "key": "INCLUDE_RATE_LIMIT_TESTS", "value": "<from .env, default false>", "enabled": true }
   ]
 }
 ```
 
 Add one entry per collection variable.
+
+**Matrix-required vars** (see `.claude/commands/qa-negative-matrix.md`):
+- `expiredAccessToken`: Generate a JWT with `exp` set to past (e.g. yesterday) using the same signing key the spec implies. If unable to generate, leave as placeholder and warn user. The agent attempts a best-effort generation by signing `{"sub":"test","exp":<yesterday-epoch>}` with a dummy key — the test still works because the server rejects on `exp` before validating signature in most JWT libraries.
+- `tamperedAccessToken`: Populated at runtime by the Setup folder. Add a Setup pre-request script that reads `{{accessToken}}`, flips one char in the payload section, sets `{{tamperedAccessToken}}`. Re-derived per Newman run.
+- `altUserAccessToken`: If any endpoint triggers `auth-wrong-role` (RBAC condition), ask the user **once** during this phase: "The `auth-wrong-role` row applies to N endpoints. Provide credentials for a different user/role, or skip this row?". If they provide → add a Setup Login request for that user, populate `{{altUserAccessToken}}` at runtime. If they skip → mark `auth-wrong-role` as `skipped (no alt-user creds)` across all those endpoints.
+- `nonExistentId`: Fixed value, used by `res-not-found` row.
+- `RESPONSE_TIME_SLA_MS`: From `.env`, used by the cross-cutting response-time assertion.
+- `INCLUDE_RATE_LIMIT_TESTS`: From `.env`, used to gate rate-limit row generation.
 
 ---
 

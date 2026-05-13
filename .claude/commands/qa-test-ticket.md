@@ -181,20 +181,26 @@ Naming: `TC<NN>: <scenario> (<expected status>)`
 - `TC02b: Verify Order Status After Submission (200)` — use `b/c/d` suffix for verification steps tied to a primary case
 
 ### Negative folder
-Always include the full auth matrix per primary endpoint:
-- No auth → 401
-- Expired token → 401
-- Tampered token → 401
-- Malformed token → 401
+Apply the **full negative matrix** (`.claude/commands/qa-negative-matrix.md`) to every endpoint the ticket touches. Walk every row, check the condition, generate the test or mark `n/a` — same logic as `/qa-api-test-setup` Phase 5c.
 
-Plus ticket-specific failures:
-- Missing required fields → 400
-- Non-existent IDs → 404
-- Wrong state transitions → 422
-- Conflicts / duplicates → 409 (if applicable)
-- Unauthorized role → 403 (if RBAC mentioned in ticket)
+Rows that almost always apply (auth-matrix from existing rule):
+- `auth-no-token` → 401
+- `auth-expired-token` → 401
+- `auth-tampered-token` → 401
+- `auth-malformed-token` → 401
+- `auth-wrong-role` → 403 (if RBAC mentioned in ticket OR endpoint has owner-scoped path param)
 
-**Numbering is continuous across Positive → Negative**. If Positive ends at TC10b, Negative starts at TC11.
+Plus the rest of the matrix where applicable:
+- `val-*` (missing required, wrong type, out of range, regex mismatch, enum out of range) → 400
+- `res-*` (not found, wrong state, conflict) → 404/422/409
+- `sec-*` (SQL injection, XSS, path traversal, CORS) → rejected/non-2xx
+- `sec-rate-limit` only if `INCLUDE_RATE_LIMIT_TESTS=true` in `.env`
+
+Cross-cutting assertions (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`) added INTO every test script — not as separate tests.
+
+**Folder layout for ticket collections**: keep `Negative` **flat** (no `Auth`/`Validation`/`Resource`/`Security` sub-folders). Ticket surface area is small enough that flat is more navigable. The 4-way split is only for the main collection.
+
+**Numbering is continuous across Positive → Negative**. If Positive ends at TC10b, Negative starts at TC11. Within Negative, the matrix-driven order is: Auth rows first (TC11-TC15), Validation rows next, Resource rows, then Security rows — but it's all one continuous TC sequence in one flat folder.
 
 ### Print the plan
 
@@ -471,7 +477,15 @@ Credentials added to .env: <list, or "none">
 
 Remaining failures (after auto-fix):
   - <TC>: <category: real-bug / env / account / flaky> — <one-line reason>
+
+Negative coverage:
+  Total applicable rows: <N>
+  Covered:               <N>
+  Skipped (rate-limit):  <N>
+  Coverage:              <pct>%
 ```
+
+**Also write the full coverage report to `collection-run-issues/<KEY>-coverage-<YYYYMMDD-HHMMSS>.txt`** using the same format as `/qa-api-test-setup` (per-endpoint row-by-row breakdown, summary by phase Setup/Happy Path/Positive/Negative). Create `collection-run-issues/` if not present.
 
 If any tests are still failing after Phase 6 (auto-fix) gave up, do NOT auto-raise tickets. The Jira logging gate is Phase 9 - it requires curl reproduction and dedupe checks first, per project memory.
 

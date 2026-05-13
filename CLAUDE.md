@@ -2,15 +2,16 @@
 
 This project is an automated API testing suite for REST APIs, built on Postman + Newman, driven by three custom slash commands defined in `.claude/commands/`. When you operate in this project, treat these commands and rules as authoritative.
 
-## The three custom commands
+## The custom commands
 
 | Command | Use when |
 |---|---|
-| `/qa-api-test-setup` | First-time project setup. Run once to build the main collection from an OpenAPI spec. Has a preflight guard - refuses to re-run on an already-set-up project unless the user types `force re-setup`. Main collection uses **nested module folders + Positive/Negative sub-folders** (module names come from OpenAPI spec tags). |
+| `/qa-api-test-setup` | First-time project setup. Run once to build the main collection from an OpenAPI spec. Has a preflight guard - refuses to re-run on an already-set-up project unless the user types `force re-setup`. Main collection uses **Happy Path folder + nested module folders + Positive/Negative-with-4-sub-folder layout**. |
 | `/qa-test-ticket <JIRA-KEY>` | A new Jira ticket needs scoped API tests. Auto-runs `/qa-api-sync` first, hard-stops on missing credentials, builds a standalone `<KEY>: <feature>` collection with **flat Setup / Happy Path - All Endpoints / Positive / Negative folders** (no module sub-grouping — tickets are scoped to one feature). Happy Path is ordered by a dependency audit scoped to the ticket's endpoints. |
 | `/qa-api-sync` | The OpenAPI spec changed and the collection is out of date. Diffs spec vs snapshot, auto-updates the main collection's request bodies/params (preserves test scripts), refreshes affected ticket collections, archives removed endpoints as `[DEPRECATED]`. Scheduled daily at 2:30 PM BDT via `/schedule`. |
+| `/qa-negative-audit` | On-demand negative-coverage audit. Walks every endpoint, evaluates the negative matrix, reports gaps per endpoint, and offers to fill them in module-wise batches with a checkpoint file. Run when sync flagged many additions, or periodically to catch coverage drift. **Distinct from `/qa-api-sync`** — sync = spec drift, audit = coverage drift. |
 
-Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`, `qa-api-sync.md`. Workflow walk-throughs are in `README.md`.
+Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`, `qa-api-sync.md`, `qa-negative-audit.md`. The shared negative matrix template lives in `.claude/commands/qa-negative-matrix.md` and is sourced by all four commands. Workflow walk-throughs are in `README.md`.
 
 ## Hard rules (project conventions - never violate)
 
@@ -49,6 +50,18 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 
 - **Accept Scalar / Swagger UI / Redoc reference pages as spec sources, not just raw OpenAPI JSON/YAML.** When the user provides a URL that returns HTML, both `/qa-api-test-setup` (Phase 2a) and `/qa-api-sync` (Phase 1a) must auto-discover the underlying spec by looking at: Scalar embed (`<script id="api-reference" data-url="...">`), inline Scalar (`<script id="api-reference" type="application/json">`), Redoc embed (`<redoc spec-url="...">`), Swagger UI config (`url:`/`urls:` inside script blocks), and conventional paths (`/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`). If discovery fails, ask the user once for the raw spec URL.
 - **Mandatory endpoint count print after loading any spec.** After a successful spec load in `/qa-api-test-setup` Phase 2b and `/qa-api-sync` Phase 1b, print a fixed summary block to the user (source, resolved spec URL, OpenAPI version, total endpoints, per-tag module counts, auth schemes — and for sync, delta vs snapshot). This is non-skippable. **Hard stop if total endpoints = 0.**
+
+### Negative coverage matrix
+
+- **Every endpoint MUST be evaluated against the full negative matrix** defined in `.claude/commands/qa-negative-matrix.md`. The agents do not "decide mentally" what negatives are worth writing — they walk every matrix row, evaluate the condition, and either generate the test or mark the row `n/a (condition not met)`. No row is silently skipped.
+- **The matrix has 24 rows** organized into 4 negative categories (`Auth`, `Validation`, `Resource`, `Security`) plus 6 cross-cutting assertions added INTO existing test scripts (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`, `xcut-idempotency`).
+- **Main collection: 4-way `Negative` sub-folder split.** Every module's `Negative` folder has `Auth` / `Validation` / `Resource` / `Security` sub-folders, always created upfront even if empty. TC numbering is continuous across all four (single counter per module).
+- **Ticket collections: flat `Negative`.** Same matrix applied, but the 4 categories share one flat folder since ticket surface area is small.
+- **Rate-limit tests are destructive and opt-in.** Gated by `INCLUDE_RATE_LIMIT_TESTS=true` in `.env`. Default `false`. Asked once during `/qa-api-test-setup` Phase 1. The audit reports skipped rate-limit rows as `skipped (INCLUDE_RATE_LIMIT_TESTS=false)` so the gap stays visible.
+- **Coverage = `covered / (covered + missing)`**, with `n/a` and `skipped` excluded from the denominator. A "100% coverage" project means every applicable row has a test, not necessarily that every matrix row was generated.
+- **`/qa-negative-audit` is the canonical way to check coverage.** Sync may suggest running it after big spec changes; manual runs are encouraged periodically (weekly / monthly) to catch hand-edit drift.
+- **Matrix is the contract.** When a test-script template or payload needs to change globally, edit `qa-negative-matrix.md`. All four commands re-read it on their next run.
+- **Audit edits are additive only.** `/qa-negative-audit` never modifies or deletes existing tests; it only adds missing ones. Renumbering or removing requires explicit human action.
 
 ### Dependency-aware ordering (audit pass)
 
@@ -121,16 +134,24 @@ your-project/
 ├── .gitignore                          # Tells git which generated files to skip
 ├── README.md, CLAUDE.md                # Docs
 ├── .claude/
-│   ├── commands/                       # The three agent definitions
-│   └── templates/                      # run-tests.sh + generate-issues.py templates
+│   ├── commands/                       # Agent definitions + shared matrix reference
+│   │   ├── qa-api-test-setup.md
+│   │   ├── qa-test-ticket.md
+│   │   ├── qa-api-sync.md
+│   │   ├── qa-negative-audit.md
+│   │   └── qa-negative-matrix.md       # shared matrix — sourced by all 4 commands
+│   ├── templates/                      # run-tests.sh + generate-issues.py templates
+│   ├── settings.local.json             # project-local Postman API key (gitignored)
+│   └── settings.local.json.example     # template for cloners
 ├── run-tests.sh                        # GENERATED from template by /qa-api-test-setup
 ├── generate-issues.py                  # GENERATED from template by /qa-api-test-setup
 ├── newman-env.json                     # GENERATED by /qa-api-test-setup
 ├── <project-slug>-collection.json      # GENERATED main Postman collection export
 ├── <jira-key>-collection.json          # GENERATED one per Jira ticket built
 ├── api-snapshot-YYYY-MM-DD.json        # GENERATED drift baseline
+├── .audit-progress.json                # GENERATED (transient) — checkpoint for resumable /qa-negative-audit; auto-deleted on full completion
 ├── newman-reports/                     # GENERATED HTML + JSON per run
-└── collection-run-issues/              # GENERATED parsed issues .txt per run
+└── collection-run-issues/              # GENERATED parsed issues .txt per run + coverage-*.txt reports from /qa-negative-audit --report-only
 ```
 
 ## Template flow (`.claude/templates/` → project root)
