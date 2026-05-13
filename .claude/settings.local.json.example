@@ -1,5 +1,19 @@
 {
   "env": {
     "POSTMAN_API_KEY": "PMAK-xxxxxxxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  },
+  "permissions": {
+    "allow": [
+      "mcp__plugin_postman_postman__*",
+      "Bash(curl *)",
+      "Bash(bash ./run-tests.sh)",
+      "Bash(./run-tests.sh)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 *)",
+      "Bash(node *)",
+      "Bash(newman run *)",
+      "Read(//tmp/**)"
+    ]
   }
 }

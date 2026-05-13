@@ -12,6 +12,20 @@ A self-contained QA workflow that:
 
 All three pieces are slash commands that live in `.claude/commands/` and are invoked from inside Claude Code.
 
+## Prerequisites
+
+Before running any of the agents, make sure your machine has:
+
+1. **Claude Code** installed and signed in.
+2. **Newman** installed globally (`npm install -g newman newman-reporter-htmlextra`) — used by `run-tests.sh` to execute the collections.
+3. **`python3`** available on the PATH — used by `generate-issues.py` to produce the human-readable failure report.
+4. The following **Claude Code plugins enabled in your global `~/.claude/settings.json`**:
+   - `postman@claude-plugins-official` — **required**. Used by all four agents to talk to your Postman workspace.
+   - `atlassian@claude-plugins-official` — **recommended**. Lets `/qa-test-ticket` pull Jira tickets directly. If skipped, you'll need to paste ticket content manually.
+5. A **Postman API key** (PMAK-…), either in `~/.claude/settings.json` (global) or `<project>/.claude/settings.local.json` (per-project). See the [`.env` keys section](#env-keys) for both options.
+
+If any plugin is missing when you run `/qa-api-test-setup`, Phase 0 will stop and tell you exactly which one to enable and how. You won't get silent failures partway through.
+
 ## The agents
 
 | Command | Purpose | When to run |
@@ -521,14 +535,16 @@ The Postman API key (`PMAK-...`) does NOT live in `.env`. It lives under `env.PO
 
 **Option A — Project-local (recommended for cloners)**
 
-`<project-root>/.claude/settings.local.json` — gitignored, per-project. Best if you work with multiple Postman accounts/workspaces, or just want everything for this project in one place. The repo ships a template:
+`<project-root>/.claude/settings.local.json` — gitignored, per-project. Best if you work with multiple Postman accounts/workspaces, or just want everything for this project in one place. The repo ships a template with both your PMAK slot AND the pre-approved permission list (so you don't get spammed with permission prompts on the first run):
 
 ```bash
 cp .claude/settings.local.json.example .claude/settings.local.json
 # then edit .claude/settings.local.json and paste your PMAK
 ```
 
-If `.claude/settings.local.json` already exists in your clone (e.g. it has a `permissions` block), merge an `env` key into it rather than overwriting:
+The pre-approved `permissions.allow` block whitelists every Postman MCP tool (`mcp__plugin_postman_postman__*`), `curl`, `python3`, `node`, `newman run`, and the project's `run-tests.sh`. If you'd rather grant each one interactively, delete the `permissions` block from your copy.
+
+If `.claude/settings.local.json` already exists in your clone (e.g. you've added your own custom permissions), merge an `env` key into it rather than overwriting:
 ```json
 {
   "permissions": { ... existing ... },
