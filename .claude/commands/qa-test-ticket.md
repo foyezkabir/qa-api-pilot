@@ -198,7 +198,7 @@ Plus the rest of the matrix where applicable:
 
 Cross-cutting assertions (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`) added INTO every test script — not as separate tests.
 
-**Folder layout for ticket collections**: keep `Negative` **flat** (no `Auth`/`Validation`/`Resource`/`Security` sub-folders). Ticket surface area is small enough that flat is more navigable. The 4-way split is only for the main collection.
+**Folder layout for ticket collections**: keep `Negative` **flat** (no `Auth Failures` / `Validation Failures` / `Resource Errors` / `Security Probes` sub-folders). Ticket surface area is small enough that flat is more navigable. The 4-way split is only for the main collection.
 
 **Numbering is continuous across Positive → Negative**. If Positive ends at TC10b, Negative starts at TC11. Within Negative, the matrix-driven order is: Auth rows first (TC11-TC15), Validation rows next, Resource rows, then Security rows — but it's all one continuous TC sequence in one flat folder.
 
@@ -240,20 +240,36 @@ Ask: `Does this flow look right, or any changes?` Same response options as `/qa-
 
 ## Phase 4 — Build the ticket collection
 
-### 4a — Create the collection
+### 4a — Locate or create the shared Postman environment
+
+Before creating the collection, ensure the **shared project env** (`<ProjectName> Environment`) exists. Ticket collections read/write tokens and chained IDs from this env, NOT from a per-ticket env (one env per project, shared by main + all ticket collections — keeps the workspace clean and lets tokens carry between collections).
+
+1. Call `mcp__plugin_postman_postman__getEnvironments` for the workspace. Look for an env named `<ProjectName> Environment` (where `<ProjectName>` is derived from `BASE_URL` host or matches the main collection's project name).
+2. **If found** → save its ID. Skip to 4b.
+3. **If not found** → warn the user:
+   ```
+   No shared Postman environment found. The main collection from /qa-api-test-setup
+   should have created "<ProjectName> Environment". I'll create one now with the
+   universal vars (baseUrl, accessToken, etc.) so this ticket can run.
+   ```
+   Then create it via `mcp__plugin_postman_postman__createEnvironment` using the **same universal-var list** as `/qa-api-test-setup` Phase 6b. Save the returned ID.
+4. Scan the ticket's endpoints (from Phase 1) for any new chained-ID vars that aren't yet in the env (e.g. ticket uses a `{{testInvoiceId}}` that the env doesn't have). Patch the env via `mcp__plugin_postman_postman__patchEnvironment` to add the missing keys with empty values.
+5. **Also update local `newman-env.json`** to mirror — same dual-write rule as the setup command.
+
+### 4b — Create the collection
 
 `mcp__plugin_postman_postman__createCollection`:
 - `name`: `<KEY>: <feature name>` (e.g. `PROJ-123: Order Submission Flow`)
 - `description`: `Test collection for <KEY>. <ticket summary>`
 - `workspace`: the workspace ID from Phase 0d
 - `auth`: bearer using `{{accessToken}}`
-- `variable`: include `baseUrl`, `accessToken`, `refreshToken`, `platformApiKey` (if API-key auth used), plus one `test<Entity>Id` per chained entity (`testBranchId`, `testSupplierId`, etc.)
+- `variable`: keep this **minimal** — only the few collection-scoped vars not in the shared env. Most variable chaining for tickets goes through `pm.environment.set(...)` reading the shared env from 4a, not collection vars. Include here only if absolutely ticket-local (rare).
 
-### 4b — Create the 4 folders
+### 4c — Create the 4 folders
 
 `mcp__plugin_postman_postman__createCollectionFolder` for `Setup`, `Happy Path - All Endpoints`, `Positive`, `Negative` — **in that order** so they appear in run order in the collection. Save IDs.
 
-### 4c — Create requests
+### 4d — Create requests
 
 For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: the target folder

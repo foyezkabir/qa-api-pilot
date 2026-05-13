@@ -10,7 +10,7 @@ This file is the **single source of truth** for what negative tests the agents g
 | Command | When it applies the matrix |
 |---|---|
 | `/qa-api-test-setup` | Phase 5c — first-time build, applies matrix per endpoint, distributes into sub-folders |
-| `/qa-test-ticket` | Phase 4c — applies matrix scoped to the ticket's endpoints, keeps flat Negative folder |
+| `/qa-test-ticket` | Phase 4d — applies matrix scoped to the ticket's endpoints, keeps flat Negative folder |
 | `/qa-api-sync` | Phase 4a — when an ADDED endpoint comes in, generates the full applicable matrix for it |
 | `/qa-negative-audit` | The whole reason it exists — diffs current coverage against this matrix, fills gaps |
 
@@ -22,7 +22,7 @@ This file is the **single source of truth** for what negative tests the agents g
 
 Each row below has: a stable `id` the agents use in the coverage report, the **condition** under which the row applies, the **expected status / behavior**, the **Postman test script template**, and the **target sub-folder** in the main collection (ticket collections are flat).
 
-### Auth sub-folder
+### Auth Failures sub-folder
 
 | id | Condition | Test name pattern | Expected | Test script |
 |---|---|---|---|---|
@@ -32,7 +32,7 @@ Each row below has: a stable `id` the agents use in the coverage report, the **c
 | `auth-malformed-token` | Endpoint uses JWT bearer | `<METHOD> <path> - Malformed Token (401)` | 401 | `Authorization: Bearer not.a.real.jwt` |
 | `auth-wrong-role` | Endpoint requires a specific role OR resource is owned by a user (path param like `{userId}`, `{tenantId}`) | `<METHOD> <path> - Wrong Role (403)` | 403 | Use a `{{altUserAccessToken}}` for a different user/role. Skip if no role discriminator is detectable from spec; flag as `n/a (no role info in spec)` in audit. |
 
-### Validation sub-folder
+### Validation Failures sub-folder
 
 | id | Condition | Test name pattern | Expected | Test script |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@ Each row below has: a stable `id` the agents use in the coverage report, the **c
 | `val-regex-mismatch` | Body has a `pattern` (regex) constraint, e.g. email/phone | `<METHOD> <path> - <field> Bad Format (400)` | 400 | Send a value that violates the regex (e.g. `notanemail` for an email field). |
 | `val-enum-out-of-range` | Body or query has `enum` constraint | `<METHOD> <path> - <field> Bad Enum (400)` | 400 | Send a value not in the enum list. |
 
-### Resource sub-folder
+### Resource Errors sub-folder
 
 | id | Condition | Test name pattern | Expected | Test script |
 |---|---|---|---|---|
@@ -50,7 +50,7 @@ Each row below has: a stable `id` the agents use in the coverage report, the **c
 | `res-wrong-state` | Spec mentions state transitions OR endpoint name contains lifecycle verb (`/submit`, `/approve`, `/cancel`, `/publish`) | `<METHOD> <path> - Wrong State (422)` | 422 | Call lifecycle endpoint on a resource that is already in a terminal state. Setup must create a resource in the "wrong" state for this test. |
 | `res-conflict` | Endpoint creates a resource with uniqueness constraint (e.g. unique email) | `<METHOD> <path> - Duplicate (409)` | 409 | First call succeeds (in Setup), second call with same unique value → 409. |
 
-### Security sub-folder
+### Security Probes sub-folder
 
 | id | Condition | Test name pattern | Expected | Test script |
 |---|---|---|---|---|
@@ -84,13 +84,15 @@ Inside each module's `Negative` folder, the four sub-folders are created upfront
 ```
 00. Auth
 └── Negative
-    ├── Auth        ← rows: auth-no-token, auth-expired-token, auth-tampered-token, auth-malformed-token, auth-wrong-role
-    ├── Validation  ← rows: val-missing-required, val-wrong-type, val-out-of-range, val-regex-mismatch, val-enum-out-of-range
-    ├── Resource    ← rows: res-not-found, res-wrong-state, res-conflict
-    └── Security    ← rows: sec-sql-injection, sec-xss-reflection, sec-path-traversal, sec-rate-limit, sec-cors-preflight
+    ├── Auth Failures        ← rows: auth-no-token, auth-expired-token, auth-tampered-token, auth-malformed-token, auth-wrong-role
+    ├── Validation Failures  ← rows: val-missing-required, val-wrong-type, val-out-of-range, val-regex-mismatch, val-enum-out-of-range
+    ├── Resource Errors      ← rows: res-not-found, res-wrong-state, res-conflict
+    └── Security Probes      ← rows: sec-sql-injection, sec-xss-reflection, sec-path-traversal, sec-rate-limit, sec-cors-preflight
 ```
 
-TC numbering is continuous across all four sub-folders. If `Negative/Auth` ends at TC09, `Negative/Validation` starts at TC10 — single counter per module.
+Each sub-folder name describes the **category of negative test** stored in it (the failure type), applied to the **parent module's endpoints**. So `01. Orders > Negative > Auth Failures` holds the auth-failure tests *for Orders endpoints* — not tests of the Auth module.
+
+TC numbering is continuous across all four sub-folders. If `Negative > Auth Failures` ends at TC09, `Negative > Validation Failures` starts at TC10 — single counter per module.
 
 Ticket collections keep `Negative` flat (no sub-folders) since the test count is small.
 

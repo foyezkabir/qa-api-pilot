@@ -31,6 +31,17 @@ Check the main collection exists. Locate `<project-slug>-collection.json` in the
 
 Check the negative matrix reference exists: `.claude/commands/qa-negative-matrix.md`. If missing → stop and tell user the matrix doc is the contract; nothing to audit against without it.
 
+Check the shared Postman environment exists. Call `mcp__plugin_postman_postman__getEnvironments` and look for `<ProjectName> Environment`. If missing, warn the user:
+```
+Shared Postman environment "<ProjectName> Environment" not found.
+This means Postman GUI runs and matrix-based negative tests (which use vars like
+{{expiredAccessToken}}, {{nonExistentId}}) will not work until the env is recreated.
+
+Recreate it now from the setup spec (y/n)?
+```
+- `y` → call `mcp__plugin_postman_postman__createEnvironment` with the universal-var list from `/qa-api-test-setup` Phase 6b. Save its ID.
+- `n` → continue, but mark in the audit report that env-dependent rows can't be verified.
+
 ### 0c — Resume from checkpoint?
 
 If `.audit-progress.json` exists in the project root:
@@ -64,7 +75,7 @@ Fetch the collection via `mcp__plugin_postman_postman__getCollection`. Parse the
 - Find `Happy Path - All Endpoints` (record its endpoint set, for cross-reference).
 - For each module folder (`<NN>. <ModuleName>`), find:
   - `Positive` and its requests
-  - `Negative` and its sub-folders: `Auth`, `Validation`, `Resource`, `Security` (any missing sub-folder = creates a gap automatically; record so Phase 5 creates them).
+  - `Negative` and its sub-folders: `Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes` (any missing sub-folder = creates a gap automatically; record so Phase 5 creates them). For older collections that still have the short names (`Auth`, `Validation`, `Resource`, `Security`) or a flat layout, run `/qa-negative-audit --reorganize` first.
 
 Build an in-memory index keyed by `<METHOD> <path>`:
 
@@ -174,7 +185,7 @@ Generate the missing tests in batches of 1 module at a time?
 
 ## Phase 4 — Sub-folder normalization
 
-Before filling gaps, ensure every module has the 4-way Negative sub-folder structure (`Auth` / `Validation` / `Resource` / `Security`). For each module that's missing any sub-folder:
+Before filling gaps, ensure every module has the 4-way Negative sub-folder structure (`Auth Failures` / `Validation Failures` / `Resource Errors` / `Security Probes`). For each module that's missing any sub-folder:
 
 1. Use `mcp__plugin_postman_postman__createCollectionFolder` with `parentFolderId: <module>NegativeFolderId` to create the missing sub-folder.
 2. If `Negative` currently has tests directly in it (legacy flat layout), **do not move them automatically** — leave them and warn the user: `<module> > Negative has N tests at the root level. Run /qa-negative-audit --reorganize to move them into sub-folders, or move manually.`

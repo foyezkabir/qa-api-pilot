@@ -62,10 +62,11 @@ It will:
 6. Plan the collection structure with the audited flow order baked in, ask you to confirm (`y` / `n` / `edit`).
 7. Build the main Postman collection: a top-level `Happy Path - All Endpoints` smoke folder in dependency order, plus one folder per module (`NN.` index reflects flow order, not spec-tag order) with `Positive` + `Negative` sub-folders.
 8. Export the collection JSON locally.
-9. Create `newman-env.json` and `run-tests.sh`.
-10. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
+9. **Create a shared Postman Environment** in your workspace, named `<ProjectName> Environment`, with all the universal vars (`baseUrl`, `accessToken`, `refreshToken`, etc.) AND auto-detected chained-ID vars (`testUserId`, `testOrderId`, or whatever your spec defines). This is what lets you select the env in Postman GUI and run any request manually — tokens auto-populate when Login runs.
+10. Create `newman-env.json` (local mirror of the cloud env for Newman) and `run-tests.sh`.
+11. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
 
-**About the negative coverage approach.** The setup applies a **24-row negative test matrix** (`.claude/commands/qa-negative-matrix.md`) to every endpoint — not just the basic "no-auth + missing-field + 404" trio. The matrix covers Auth (no/expired/tampered/malformed token, wrong-role), Validation (missing required, wrong type, out-of-range, regex mismatch, enum out-of-range), Resource (not-found, wrong-state, conflict), and Security (SQL injection, XSS reflection, path traversal, CORS, optional rate-limit). Plus cross-cutting assertions (response time, schema validation, sensitive-data leak, error body structure, no stack trace, idempotency) added INTO every test. The agent walks every matrix row per endpoint and either generates the test or marks it `n/a (condition not met)` — nothing is mentally skipped. Rate-limit tests are destructive and opt-in via `INCLUDE_RATE_LIMIT_TESTS=true` in `.env` (default `false`, asked once during setup). For big projects, builds happen module-wise with a continue prompt every module if `>20` endpoints total.
+**About the negative coverage approach.** The setup applies a **24-row negative test matrix** (`.claude/commands/qa-negative-matrix.md`) to every endpoint — not just the basic "no-auth + missing-field + 404" trio. The matrix covers `Auth Failures` (no/expired/tampered/malformed token, wrong-role), `Validation Failures` (missing required, wrong type, out-of-range, regex mismatch, enum out-of-range), `Resource Errors` (not-found, wrong-state, conflict), and `Security Probes` (SQL injection, XSS reflection, path traversal, CORS, optional rate-limit). Plus cross-cutting assertions (response time, schema validation, sensitive-data leak, error body structure, no stack trace, idempotency) added INTO every test. The agent walks every matrix row per endpoint and either generates the test or marks it `n/a (condition not met)` — nothing is mentally skipped. Rate-limit tests are destructive and opt-in via `INCLUDE_RATE_LIMIT_TESTS=true` in `.env` (default `false`, asked once during setup). For big projects, builds happen module-wise with a continue prompt every module if `>20` endpoints total.
 
 ### Day 2 onwards: Spec stays in sync automatically
 
@@ -140,29 +141,55 @@ The main collection has a top-level **`Happy Path - All Endpoints`** folder (a q
 
 ```
 <ProjectName> API — Automated Tests
-├── Happy Path - All Endpoints     # runs first; one valid-data request per endpoint
+├── Happy Path - All Endpoints     # runs first; one valid-data request per endpoint, audited flow order
 │   ├── POST /auth/login
 │   ├── GET  /orders
 │   ├── POST /orders
 │   └── ...                          # named <METHOD> <path>, status-only assertions
-├── 00. <Module1>           # name comes from OpenAPI tag
+├── 00. <Module1>           # NN. index = audited dependency-flow order, not spec-tag order
 │   ├── Positive
 │   │   ├── TC01: <happy path> (200)
 │   │   └── TC02: <another happy path> (201)
-│   └── Negative
-│       ├── TC03: <no auth> (401)
-│       └── TC04: <missing required field> (400)
+│   └── Negative                                    # 4-way sub-folder split, continuous TC numbering across all four
+│       ├── Auth Failures                           # matrix rows: no-auth, expired/tampered/malformed token, wrong-role
+│       │   ├── TC03: <no auth> (401)
+│       │   ├── TC04: <expired token> (401)
+│       │   ├── TC05: <tampered token> (401)
+│       │   ├── TC06: <malformed token> (401)
+│       │   └── TC07: <wrong role> (403)
+│       ├── Validation Failures                     # missing required, wrong type, out-of-range, regex, enum
+│       │   ├── TC08: <missing required field> (400)
+│       │   ├── TC09: <wrong type> (400)
+│       │   └── TC10: <out of range> (400)
+│       ├── Resource Errors                         # not-found, wrong-state, conflict
+│       │   ├── TC11: <non-existent ID> (404)
+│       │   └── TC12: <duplicate> (409)
+│       └── Security Probes                         # SQL injection, XSS, path traversal, CORS, opt-in rate-limit
+│           ├── TC13: <SQL injection probe> (rejected)
+│           ├── TC14: <XSS probe> (not reflected)
+│           └── TC15: <path traversal> (rejected)
 ├── 01. <Module2>
 │   ├── Positive
 │   │   └── TC01: <happy path> (200)
 │   └── Negative
-│       └── TC02: <no auth> (401)
+│       ├── Auth Failures
+│       │   └── TC02: <no auth> (401)
+│       ├── Validation Failures
+│       ├── Resource Errors
+│       └── Security Probes
 └── 02. <Module3>
     ├── Positive
     │   └── ...
     └── Negative
-        └── ...
+        ├── Auth Failures
+        ├── Validation Failures
+        ├── Resource Errors
+        └── Security Probes
 ```
+
+> **Note:** every module's `Negative` folder ALWAYS has all 4 sub-folders (`Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes`), even if some are empty for that module. Keeps the layout visually consistent so users always know where to look. The sub-folder name describes the **category of failure** the tests inside cover, applied to the **parent module's** endpoints — so `Orders > Negative > Auth Failures` holds the auth-failure tests *for Orders endpoints* (not tests of the Auth module).
+> **TC numbering** is continuous across all 4 Negative sub-folders within a module — a single counter from where Positive ended.
+> **Cross-cutting assertions** (response time SLA, schema validation, sensitive-data leak, error body structure, no-stack-trace) are added INTO existing test scripts as additional `pm.test(...)` blocks, not as separate test cases.
 
 Key properties:
 - **`Happy Path - All Endpoints`** is a fast smoke pass. One valid-data request per `(method, path)`, named `<METHOD> <path>` exactly. Status-only assertion (`2xx`). Requests are ordered by the **dependency audit** (`POST /auth/login` runs before `GET /profile`, `POST /orders` runs before `GET /orders/{id}`, etc.), not by spec order. This folder is in addition to — not replacing — the module folders.
@@ -218,7 +245,7 @@ Every ticket collection is a **standalone, flat four-folder collection** - no mo
 │   ├── 2. Fetch <Entity> ID
 │   ├── 3. Create <Entity>
 │   └── ...                           # scaled to whatever the ticket needs
-├── Happy Path - All Endpoints       # scoped to the endpoints this ticket touches
+├── Happy Path - All Endpoints       # scoped to the endpoints this ticket touches, audited order
 │   ├── POST /api/v1/orders
 │   ├── GET  /api/v1/orders/{id}
 │   └── ...                           # named <METHOD> <path>, status-only assertions
@@ -227,22 +254,31 @@ Every ticket collection is a **standalone, flat four-folder collection** - no mo
 │   ├── TC02: <next AC scenario> (200)
 │   ├── TC02b: <verification step tied to TC02> (200)
 │   └── ...
-└── Negative
-    ├── TC<N>: <no auth> (401)
+└── Negative                                       # flat folder; full matrix applied, continuous TC
+    ├── TC<N>:   <no auth> (401)                   # Auth rows from the matrix
     ├── TC<N+1>: <expired token> (401)
     ├── TC<N+2>: <tampered token> (401)
     ├── TC<N+3>: <malformed token> (401)
-    └── TC<N+4>: <validation / state failures from AC> (400/404/409/422)
+    ├── TC<N+4>: <wrong role> (403)
+    ├── TC<N+5>: <missing required field> (400)    # Validation rows
+    ├── TC<N+6>: <wrong type> (400)
+    ├── TC<N+7>: <out of range> (400)
+    ├── TC<N+8>: <non-existent ID> (404)            # Resource rows
+    ├── TC<N+9>: <wrong state transition> (422)
+    ├── TC<N+10>: <duplicate> (409)
+    ├── TC<N+11>: <SQL injection probe> (rejected)  # Security rows
+    ├── TC<N+12>: <XSS probe> (not reflected)
+    └── TC<N+13>: <path traversal> (rejected)
 ```
 
 Key properties:
 - **Standalone collection, not a fork** of the main one. Lives independently in Postman.
 - **Named `<KEY>: <feature name>`** (e.g. `PROJ-123: Order Submission Flow`).
-- **Flat four folders only, in run order**: `Setup`, `Happy Path - All Endpoints`, `Positive`, `Negative`. No module sub-folders.
+- **Flat four folders only, in run order**: `Setup`, `Happy Path - All Endpoints`, `Positive`, `Negative`. No module sub-folders, and no sub-folders within `Negative` (unlike the main collection's 4-way split — ticket scope is small enough that flat is more navigable).
 - **Happy Path - All Endpoints** is scoped to only the endpoints this ticket touches — one valid-data request per `(method, path)`, named `<METHOD> <path>` exactly, status-only assertions. Variable chaining (`pm.environment.set`) stays in Setup; Happy Path doesn't set vars.
 - **Setup is sized to the ticket** - a simple ticket may have 1-3 setup items; a complex feature may need 20+ (login → fetch existing IDs → create prerequisite entities → build state).
-- **Continuous TC numbering** across `Positive` then `Negative` (no reset). E.g. Positive ends at TC04, Negative starts at TC05. Happy Path requests are not TC-numbered.
-- **Full auth-matrix on every endpoint** in Negative: no auth, expired token, tampered token, malformed token.
+- **Continuous TC numbering** across `Positive` then `Negative` (no reset). E.g. Positive ends at TC04, Negative starts at TC05. Happy Path requests are not TC-numbered. Within `Negative`, the matrix-driven order is Auth Failures first, then Validation Failures, Resource Errors, Security Probes — all in one continuous TC sequence.
+- **Full negative matrix** applied to every endpoint in scope (auth-matrix, validation, resource, security rows — see `.claude/commands/qa-negative-matrix.md`). Rows whose conditions don't apply are marked `n/a` and skipped. Rate-limit probe is opt-in via `INCLUDE_RATE_LIMIT_TESTS=true` in `.env`.
 - **Verification suffixes** (`TC02b`, `TC02c`) for follow-up checks tied to a primary case.
 
 Compare with the **main collection** (`/qa-api-test-setup`), which uses a `Happy Path - All Endpoints + Module → Positive/Negative` structure because it covers every endpoint across every module of the API.
@@ -513,6 +549,43 @@ Populated by `/qa-api-test-setup`, used by all three agents at runtime.
 | `LOGIN_PASSWORD` | Test account password (used at runtime by the Login request) |
 | `PLATFORM_API_KEY` | Platform-level API key (only if any endpoints use apiKey auth) |
 | `JIRA_PROJECT_KEY` | Jira project key (e.g. `PROJ`). Auto-extracted from the first `/qa-test-ticket <KEY>` call. |
+
+### What `HEALTH_PATH` is for
+
+Before Newman runs the suite, `run-tests.sh` pings `$BASE_URL$HEALTH_PATH` with a plain `GET`. The check decides whether to even start the suite:
+
+- **2xx / 3xx / 4xx response** → server is alive → run the suite
+- **5xx or connection refused** → server is down or misconfigured → abort with a clear message instead of pretending 600 tests "failed"
+
+The goal is fail-fast on a dead environment, not a deep functional check. The endpoint only needs to **respond** to a GET — it doesn't need to return 200.
+
+**Picking a value (in order of preference):**
+
+1. **A dedicated health endpoint** if one exists in your API: `/health`, `/api/v1/health`, `/healthz`, `/status`, `/ping`. Always returns 200. Cleanest.
+2. **Any cheap public GET** from the spec — list of regions, currencies, categories, etc. Returns 200 without auth.
+3. **The login endpoint** (`LOGIN_PATH`). A GET on a POST-only path usually returns 405 Method Not Allowed, which counts as "alive". Acceptable fallback when 1 and 2 don't exist.
+
+**How to check if your API has option 1:**
+
+```bash
+source .env
+# search the spec for any health-style path
+curl -s "$OPENAPI_SPEC" | grep -iE '"(/[^"]*(health|status|ping|live|ready)[^"]*)"'
+
+# or probe the common conventions directly
+for p in /health /api/health /api/v1/health /healthz /livez /readyz /status /ping; do
+  code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL$p")
+  echo "$code  $p"
+done
+```
+
+Anything returning `200` is a good `HEALTH_PATH`.
+
+**What to avoid:**
+
+- Endpoints that need a request body (POST/PUT) — `run-tests.sh` sends GET only
+- Endpoints that hit third-party services or do heavy DB queries — slow, can flap
+- Endpoints whose path includes user-specific IDs — won't work for an anonymous ping
 
 ### Auto-detected from the OpenAPI spec (NOT required in .env)
 

@@ -51,11 +51,22 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 - **Accept Scalar / Swagger UI / Redoc reference pages as spec sources, not just raw OpenAPI JSON/YAML.** When the user provides a URL that returns HTML, both `/qa-api-test-setup` (Phase 2a) and `/qa-api-sync` (Phase 1a) must auto-discover the underlying spec by looking at: Scalar embed (`<script id="api-reference" data-url="...">`), inline Scalar (`<script id="api-reference" type="application/json">`), Redoc embed (`<redoc spec-url="...">`), Swagger UI config (`url:`/`urls:` inside script blocks), and conventional paths (`/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`). If discovery fails, ask the user once for the raw spec URL.
 - **Mandatory endpoint count print after loading any spec.** After a successful spec load in `/qa-api-test-setup` Phase 2b and `/qa-api-sync` Phase 1b, print a fixed summary block to the user (source, resolved spec URL, OpenAPI version, total endpoints, per-tag module counts, auth schemes — and for sync, delta vs snapshot). This is non-skippable. **Hard stop if total endpoints = 0.**
 
+### Postman Environment (shared across all collections in a project)
+
+- **One Postman Environment per project**, named `<ProjectName> Environment`, created in the project workspace during `/qa-api-test-setup` Phase 6c. **Shared by the main collection AND every ticket collection** — one env per project, not one env per collection.
+- The same env data is written in two places: the cloud Postman Environment (created via `createEnvironment`) AND the local `newman-env.json` file (used by Newman). Both must stay in sync — never edit one without the other.
+- **Universal vars** are always present: `baseUrl`, `accessToken`, `refreshToken`, `platformApiKey`, `expiredAccessToken`, `tamperedAccessToken`, `altUserAccessToken`, `nonExistentId`, `RESPONSE_TIME_SLA_MS`, `INCLUDE_RATE_LIMIT_TESTS`.
+- **Chained-ID vars** (`test<Entity>Id`) are **auto-detected from the spec** during setup — one per detected creatable POST endpoint. Names are never hardcoded; they're derived from the path's terminal resource segment (`POST /widgets` → `testWidgetId`).
+- `/qa-api-sync` and `/qa-test-ticket` patch new chained-ID vars into the shared env via `patchEnvironment` AND update `newman-env.json`. Existing vars are never touched.
+- `/qa-negative-audit` verifies the env exists at Phase 1; offers to recreate it if missing.
+- Ticket test scripts use `pm.environment.set(...)` (not `pm.collectionVariables.set(...)`) so they read/write to this shared env. The main project collection still uses `pm.collectionVariables` for its own scope — both can coexist; do not mix them within a single collection.
+- The user can manually run any collection in the Postman GUI by selecting `<ProjectName> Environment` from the env dropdown. Tokens auto-populate when Login runs. This is the key UX win — without the cloud env, manual Postman runs require the user to construct env vars by hand.
+
 ### Negative coverage matrix
 
 - **Every endpoint MUST be evaluated against the full negative matrix** defined in `.claude/commands/qa-negative-matrix.md`. The agents do not "decide mentally" what negatives are worth writing — they walk every matrix row, evaluate the condition, and either generate the test or mark the row `n/a (condition not met)`. No row is silently skipped.
-- **The matrix has 24 rows** organized into 4 negative categories (`Auth`, `Validation`, `Resource`, `Security`) plus 6 cross-cutting assertions added INTO existing test scripts (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`, `xcut-idempotency`).
-- **Main collection: 4-way `Negative` sub-folder split.** Every module's `Negative` folder has `Auth` / `Validation` / `Resource` / `Security` sub-folders, always created upfront even if empty. TC numbering is continuous across all four (single counter per module).
+- **The matrix has 24 rows** organized into 4 negative categories (`Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes`) plus 6 cross-cutting assertions added INTO existing test scripts (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`, `xcut-idempotency`).
+- **Main collection: 4-way `Negative` sub-folder split.** Every module's `Negative` folder has `Auth Failures` / `Validation Failures` / `Resource Errors` / `Security Probes` sub-folders, always created upfront even if empty. Sub-folder names describe the **category of failure** held inside, applied to the parent module's endpoints (e.g. `Orders > Negative > Auth Failures` = auth-failure tests for Orders endpoints, NOT tests of the Auth module). TC numbering is continuous across all four (single counter per module).
 - **Ticket collections: flat `Negative`.** Same matrix applied, but the 4 categories share one flat folder since ticket surface area is small.
 - **Rate-limit tests are destructive and opt-in.** Gated by `INCLUDE_RATE_LIMIT_TESTS=true` in `.env`. Default `false`. Asked once during `/qa-api-test-setup` Phase 1. The audit reports skipped rate-limit rows as `skipped (INCLUDE_RATE_LIMIT_TESTS=false)` so the gap stays visible.
 - **Coverage = `covered / (covered + missing)`**, with `n/a` and `skipped` excluded from the denominator. A "100% coverage" project means every applicable row has a test, not necessarily that every matrix row was generated.
@@ -145,7 +156,7 @@ your-project/
 │   └── settings.local.json.example     # template for cloners
 ├── run-tests.sh                        # GENERATED from template by /qa-api-test-setup
 ├── generate-issues.py                  # GENERATED from template by /qa-api-test-setup
-├── newman-env.json                     # GENERATED by /qa-api-test-setup
+├── newman-env.json                     # GENERATED by /qa-api-test-setup; mirror of the cloud Postman Environment "<ProjectName> Environment"
 ├── <project-slug>-collection.json      # GENERATED main Postman collection export
 ├── <jira-key>-collection.json          # GENERATED one per Jira ticket built
 ├── api-snapshot-YYYY-MM-DD.json        # GENERATED drift baseline

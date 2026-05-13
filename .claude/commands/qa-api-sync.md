@@ -186,7 +186,17 @@ For each new endpoint, create requests in the **main project collection** in two
 - If the tag matches an existing module → use that module's folder, regardless of where in the `NN.` ordering it sits. **Do not renumber existing modules** — the team may already be referencing TC IDs by their current module index, and shuffling indices mid-project is jarring.
 - If the tag is new (no matching module exists) → create a new module folder named `<NN>. <Tag>` where `NN` is the **next available index** after the current highest. E.g. if existing modules are `00. Auth`, `01. Users`, `02. Orders`, a new `Reports` tag becomes `03. Reports`. Then create its `Positive` and `Negative` sub-folders.
 
-**2. The appropriate module folder**, with **the full applicable negative matrix** from `.claude/commands/qa-negative-matrix.md`. Walk every row, check the condition against the new endpoint's spec, and generate the test in its target Negative sub-folder (`Auth` / `Validation` / `Resource` / `Security`) or mark `n/a`. Also add the **Positive happy path** in `<module>PositiveFolderId` with cross-cutting assertions (response time, schema validation, sensitive-data leak).
+**Postman environment sync**: if any ADDED endpoint qualifies as a creatable (POST + 2xx returns an ID — see `/qa-api-test-setup` Phase 6b detection rule), the corresponding `test<Entity>Id` env var must exist in the shared `<ProjectName> Environment`. To wire this up:
+
+1. List existing environments via `mcp__plugin_postman_postman__getEnvironments`, find the one named `<ProjectName> Environment`. Save its ID. If not found, warn the user (`Project env missing — re-run /qa-api-test-setup or create one manually`) and skip env updates.
+2. Fetch the current env via `mcp__plugin_postman_postman__getEnvironment`.
+3. For each new chained-ID var derived from the ADDED endpoints (e.g. `POST /widgets` → `testWidgetId`), check if it already exists in the env. If not, append it with empty value.
+4. Patch the env via `mcp__plugin_postman_postman__patchEnvironment` — pass only the **new** values; existing ones stay untouched.
+5. **Also update `<project-dir>/newman-env.json`** locally: read the current file, append the same new vars, write back. Both stay in sync.
+
+If any ADDED endpoint uses a NEW path-param like `{tenantId}` whose producer is in the same batch (matrix detected the dep), the chained var is recorded. If the path-param has no producer (orphan), it gets a placeholder `test<Entity>Id` env entry anyway so the user can wire it manually.
+
+**2. The appropriate module folder**, with **the full applicable negative matrix** from `.claude/commands/qa-negative-matrix.md`. Walk every row, check the condition against the new endpoint's spec, and generate the test in its target Negative sub-folder (`Auth Failures` / `Validation Failures` / `Resource Errors` / `Security Probes`) or mark `n/a`. Also add the **Positive happy path** in `<module>PositiveFolderId` with cross-cutting assertions (response time, schema validation, sensitive-data leak).
 
 If the module folder doesn't yet have the 4-way Negative sub-folders (older project pre-matrix), create them first via `createCollectionFolder`. Don't move existing flat tests — leave them; warn the user to run `/qa-negative-audit --reorganize` if they want them migrated.
 

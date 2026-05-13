@@ -461,7 +461,7 @@ Decide the structure using the **nested module / test-type pattern**:
 - **Sub-folders** = always two under each module: `Positive` and `Negative`. Always create both, even if one starts with a single test.
 - **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<METHOD> <path>`.
 - **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND has the **full applicable negative matrix** in its module's `Negative` sub-folders. The matrix is defined in `.claude/commands/qa-negative-matrix.md` — agents do not "decide mentally" what negatives are worth writing; they walk every matrix row, check the condition, and either write the test or mark the row as `n/a (condition not met)`. See the matrix doc for the 24 rows and their conditions. Rough averages: 4–13 negatives per endpoint depending on shape (public GETs are light, body-carrying POSTs are heavy).
-- **Negative sub-folders**: every module's `Negative` folder has 4 sub-folders, always created upfront even if empty: `Auth`, `Validation`, `Resource`, `Security`. TC numbering is continuous across all four (single counter per module).
+- **Negative sub-folders**: every module's `Negative` folder has 4 sub-folders, always created upfront even if empty: `Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes`. The name describes the *category of failure*, applied to the parent module's endpoints (e.g. `Orders > Negative > Auth Failures` = auth-failure tests for Orders endpoints, not tests of the Auth module). TC numbering is continuous across all four (single counter per module).
 - **Collection variables set by certain requests** = note explicitly which Positive tests set `accessToken` (login), `test<Entity>Id` (creates), etc.
 - **Matrix-required variables** (see matrix doc Phase 4 implementation notes): `expiredAccessToken`, `tamperedAccessToken`, `altUserAccessToken`, `nonExistentId` (`00000000-0000-0000-0000-000000000000`), `RESPONSE_TIME_SLA_MS` (default 500), `INCLUDE_RATE_LIMIT_TESTS`. These all go into `newman-env.json` (Phase 6b) with defaults; the agent asks the user for `altUserAccessToken` only if a row needing it (`auth-wrong-role`) applies to any endpoint.
 
@@ -558,7 +558,7 @@ Iterate `auditedModules` from Phase 2d **in order** (index 00 → 01 → …). F
 1. Create the top-level module folder via `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `<NN>. <ModuleName>` where `<NN>` is the audited index. Save the returned folder ID as `<module>ModuleFolderId`.
 2. Create the `Positive` sub-folder under it via the same MCP call but with `parentFolderId: <module>ModuleFolderId`. Save the returned ID as `<module>PositiveFolderId`.
 3. Create the `Negative` sub-folder the same way. Save ID as `<module>NegativeFolderId`.
-4. Create the **4 Negative sub-folders** under `<module>NegativeFolderId` — `Auth`, `Validation`, `Resource`, `Security` — in that order. Save the IDs as `<module>NegativeAuthFolderId`, `<module>NegativeValidationFolderId`, `<module>NegativeResourceFolderId`, `<module>NegativeSecurityFolderId`. **Always create all 4 even if some will end up empty** — the structure must be visually consistent across modules so users always know where to look.
+4. Create the **4 Negative sub-folders** under `<module>NegativeFolderId` — `Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes` — in that order. Save the IDs as `<module>NegativeAuthFolderId`, `<module>NegativeValidationFolderId`, `<module>NegativeResourceFolderId`, `<module>NegativeSecurityFolderId` (internal variable names kept short — they map to the longer display names). **Always create all 4 even if some will end up empty** — the structure must be visually consistent across modules so users always know where to look.
 
 Order matters here — Postman renders folders in creation order. Creating in audited order is what gives the user a top-to-bottom-runnable collection.
 
@@ -696,7 +696,7 @@ The file lives in the already-gitignored `collection-run-issues/` directory so i
 
 ---
 
-## Phase 6 — Export collection + create environment file
+## Phase 6 — Export collection + create environment (cloud + local)
 
 ### 6a — Export collection locally
 
@@ -709,37 +709,72 @@ curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
 
 Owner ID = user ID from `getAuthenticatedUser`. Collection ID = from `createCollection` response.
 
-### 6b — Newman environment file
+### 6b — Build the shared environment value list (one structure, two outputs)
 
-Write `<project-dir>/newman-env.json`:
+Build one in-memory list of env values. This list is the **single source of truth** for both the cloud Postman Environment (6c) and the local Newman env file (6d). Don't construct the two separately — they will drift.
+
+**Universal vars (always present, regardless of API):**
+
+| Key | Initial value | Notes |
+|---|---|---|
+| `baseUrl` | from `.env` `BASE_URL` | server root |
+| `accessToken` | empty | set at runtime by Login |
+| `refreshToken` | empty | set at runtime by Login |
+| `platformApiKey` | from `.env` `PLATFORM_API_KEY` if any | only used for apiKey-protected endpoints |
+| `expiredAccessToken` | best-effort generated JWT with `exp` set to yesterday, else placeholder | used by `auth-expired-token` matrix row. Generate by signing `{"sub":"test","exp":<yesterday-epoch>}` with a dummy key — most JWT libs reject on `exp` before validating signature, so it works regardless. If generation fails, warn the user; manual replacement may be needed for some auth implementations. |
+| `tamperedAccessToken` | empty | set at runtime by Setup pre-request script that reads `{{accessToken}}`, flips one payload char |
+| `altUserAccessToken` | empty | only relevant if any endpoint triggers `auth-wrong-role` (RBAC condition). Ask the user **once** during this phase: *"The `auth-wrong-role` row applies to N endpoints. Provide credentials for a different user/role, or skip this row?"*. If they provide → add a Setup Login request for that user. If they skip → mark `auth-wrong-role` as `skipped (no alt-user creds)` across all those endpoints. |
+| `nonExistentId` | `00000000-0000-0000-0000-000000000000` | fixed; used by `res-not-found` row |
+| `RESPONSE_TIME_SLA_MS` | from `.env`, default `500` | used by cross-cutting response-time assertion |
+| `INCLUDE_RATE_LIMIT_TESTS` | from `.env`, default `false` | used to gate rate-limit row generation |
+
+**Per-resource chained-ID vars (auto-detected from the spec):**
+
+Scan the spec for endpoints that qualify as **creatables**:
+- Method is `POST`
+- Path does NOT end in a verb like `/cancel`, `/submit`, `/approve`, `/publish`, `/refund`
+- Response 2xx schema contains an `id` or `<entity>Id` field
+
+For each detected creatable, derive an env var name from the path's terminal resource segment:
+- `POST /users` → `testUserId`
+- `POST /api/v1/orders` → `testOrderId`
+- `POST /pharmacies/{pharmacyId}/prescriptions` → `testPrescriptionId`
+- `POST /widgets` → `testWidgetId`
+
+Add one `{ key: "test<Entity>Id", value: "", enabled: true }` entry per detected creatable. **Names are detected per-project — none are hardcoded.** Print the detected list to the user during Phase 4's plan confirm so they can sanity-check.
+
+### 6c — Create the Postman Environment (cloud, in workspace)
+
+Call `mcp__plugin_postman_postman__createEnvironment`:
+- `workspace`: the workspace ID from Phase 1c
+- `name`: `<ProjectName> Environment`
+- `values`: the shared list built in 6b
+
+Save the returned environment ID. Print to user:
+```
+✓ Created Postman environment "<ProjectName> Environment" (id: <env-id>)
+  Open this collection in Postman → select "<ProjectName> Environment" in the top-right env dropdown → tokens auto-populate when you run Login.
+```
+
+This is what lets the user **manually run requests from the Postman GUI**. Without this step they'd have to construct env vars by hand in Postman. With it, opening the collection and clicking Send Just Works.
+
+### 6d — Write Newman environment file (local, for run-tests.sh)
+
+Same data, file format Newman reads:
+
 ```json
 {
   "id": "<project-slug>-env",
   "name": "<ProjectName> Environment",
   "values": [
-    { "key": "baseUrl", "value": "<baseUrl>", "enabled": true },
-    { "key": "accessToken", "value": "", "enabled": true },
-    { "key": "refreshToken", "value": "", "enabled": true },
-    { "key": "platformApiKey", "value": "<apiKeyValue>", "enabled": true },
-    { "key": "expiredAccessToken", "value": "<a-known-expired-JWT>", "enabled": true },
-    { "key": "tamperedAccessToken", "value": "", "enabled": true },
-    { "key": "altUserAccessToken", "value": "", "enabled": true },
-    { "key": "nonExistentId", "value": "00000000-0000-0000-0000-000000000000", "enabled": true },
-    { "key": "RESPONSE_TIME_SLA_MS", "value": "<from .env, default 500>", "enabled": true },
-    { "key": "INCLUDE_RATE_LIMIT_TESTS", "value": "<from .env, default false>", "enabled": true }
+    // ... same list as Phase 6b, written as JSON ...
   ]
 }
 ```
 
-Add one entry per collection variable.
+Write to `<project-dir>/newman-env.json`. Both 6c and 6d come from the same in-memory list — they can't drift unless something edits one without the other.
 
-**Matrix-required vars** (see `.claude/commands/qa-negative-matrix.md`):
-- `expiredAccessToken`: Generate a JWT with `exp` set to past (e.g. yesterday) using the same signing key the spec implies. If unable to generate, leave as placeholder and warn user. The agent attempts a best-effort generation by signing `{"sub":"test","exp":<yesterday-epoch>}` with a dummy key — the test still works because the server rejects on `exp` before validating signature in most JWT libraries.
-- `tamperedAccessToken`: Populated at runtime by the Setup folder. Add a Setup pre-request script that reads `{{accessToken}}`, flips one char in the payload section, sets `{{tamperedAccessToken}}`. Re-derived per Newman run.
-- `altUserAccessToken`: If any endpoint triggers `auth-wrong-role` (RBAC condition), ask the user **once** during this phase: "The `auth-wrong-role` row applies to N endpoints. Provide credentials for a different user/role, or skip this row?". If they provide → add a Setup Login request for that user, populate `{{altUserAccessToken}}` at runtime. If they skip → mark `auth-wrong-role` as `skipped (no alt-user creds)` across all those endpoints.
-- `nonExistentId`: Fixed value, used by `res-not-found` row.
-- `RESPONSE_TIME_SLA_MS`: From `.env`, used by the cross-cutting response-time assertion.
-- `INCLUDE_RATE_LIMIT_TESTS`: From `.env`, used to gate rate-limit row generation.
+**Sync rule going forward:** When `/qa-api-sync` or `/qa-test-ticket` adds new chained variables (e.g. a newly-added `POST /widgets` introduces `testWidgetId`), it patches the cloud env via `patchEnvironment` AND rewrites `newman-env.json`. Both stay in sync.
 
 ---
 
