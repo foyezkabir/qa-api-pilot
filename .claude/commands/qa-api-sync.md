@@ -180,8 +180,13 @@ For each new endpoint, create requests in the **main project collection** in two
 - Body: valid data from the spec. Use `{{$timestamp}}` for unique fields.
 - Test: status-only — `pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);`
 - If the added endpoint is a login or creates an entity, include the same variable-set block (`pm.collectionVariables.set('accessToken'/'test<Entity>Id', ...)`) so downstream Happy Path requests can chain.
+- **Position in the folder** (sync-mini-audit): Do **not** append to the bottom blindly. Run a scoped dependency audit on just this endpoint vs. the existing Happy Path entries (same four signals as `/qa-api-test-setup` Phase 2d). Find its correct dependency slot and insert there using Postman's request-ordering API (`mcp__plugin_postman_postman__transferCollectionRequests` if available, otherwise reorder via `putCollection`). If the new endpoint produces a variable that an existing endpoint needs, insert before that consumer. If it consumes a variable from an existing endpoint, insert after that producer. If it's a true orphan (no producer found anywhere), append at the end and warn the user in the Phase 3 report.
 
-**2. The appropriate module folder** (matched by the endpoint's OpenAPI `tag`), with the standard module-level test set:
+**Module-folder resolution**: match the endpoint's OpenAPI `tag` against existing module folders by name (ignore the `NN.` prefix when matching).
+- If the tag matches an existing module → use that module's folder, regardless of where in the `NN.` ordering it sits. **Do not renumber existing modules** — the team may already be referencing TC IDs by their current module index, and shuffling indices mid-project is jarring.
+- If the tag is new (no matching module exists) → create a new module folder named `<NN>. <Tag>` where `NN` is the **next available index** after the current highest. E.g. if existing modules are `00. Auth`, `01. Users`, `02. Orders`, a new `Reports` tag becomes `03. Reports`. Then create its `Positive` and `Negative` sub-folders.
+
+**2. The appropriate module folder**, with the standard module-level test set:
 
 | Test type | Always or conditional | Purpose |
 |---|---|---|

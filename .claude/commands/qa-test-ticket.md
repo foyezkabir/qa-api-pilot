@@ -160,6 +160,8 @@ Naming: `<METHOD> <path>` exactly (e.g. `POST /api/v1/orders`, `GET /api/v1/orde
 
 The login request belongs in `Setup` (not here) — Happy Path runs after Setup so `{{accessToken}}` is already populated.
 
+**Dependency audit (run before printing the plan):** Apply the same audit logic as `/qa-api-test-setup` Phase 2d, scoped to **only the endpoints this ticket touches**. Build the DAG from the same four signals (auth requirement, path params, body refs, verb-within-resource order). Topological sort to get the audited Happy Path order. Treat anything Setup creates as a producer (e.g. if Setup includes `Create Supplier` which sets `{{testSupplierId}}`, then `GET /suppliers/{supplierId}` has its dependency satisfied and is not an orphan). Anything still unresolved becomes an orphan, placed at the end of Happy Path with a `{{test<Entity>Id}}` placeholder and flagged in the plan.
+
 ### Setup folder
 - Login first
 - Fetch existing IDs (e.g. branch, category) needed for the feature
@@ -200,15 +202,20 @@ Plus ticket-specific failures:
 Plan for <KEY>: <feature name>
 
 Setup (<N>):
-  1. Login
-  2. Fetch Branch ID
-  3. Create Supplier
+  1. Login                                 → sets {{accessToken}}, {{refreshToken}}
+  2. Fetch Branch ID                       → sets {{testBranchId}}
+  3. Create Supplier                       → sets {{testSupplierId}}
   ...
 
-Happy Path - All Endpoints (<N>):
-  POST /api/v1/orders
-  GET  /api/v1/orders/{id}
+Happy Path - All Endpoints (<N>, audited flow order, with reasoning):
+  1. POST /api/v1/orders                   — needs {{accessToken}} (Setup #1) + {{testBranchId}} (Setup #2); produces {{testOrderId}}
+  2. GET  /api/v1/orders/{id}              — needs {{testOrderId}} (#1)
+  3. PATCH /api/v1/orders/{id}             — needs {{testOrderId}} (#1)
   ...
+  N. POST /api/v1/orders/{id}/audit-log    ⚠ orphan: no producer for {auditLogId}, placed at end
+
+Orphans (placed at end with placeholder vars, fix manually if needed):
+  - POST /api/v1/orders/{id}/audit-log    needs: {{testAuditLogId}}   reason: ticket doesn't create audit logs and no Setup producer; wire manually if test requires it
 
 Positive (<N>):
   TC01: <scenario> (200)
@@ -221,7 +228,7 @@ Negative (<N>):
 Total requests: <N>
 ```
 
-Ask: `Does this look right, or any changes?` Wait for confirmation.
+Ask: `Does this flow look right, or any changes?` Same response options as `/qa-api-test-setup` Phase 4 (`y` / `n` / `edit`). Wait for confirmation.
 
 ---
 
@@ -249,7 +256,7 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - `body`: realistic data drawn from the ticket's specific values + OpenAPI schema. Use `{{$timestamp}}` for unique fields.
 - `events` test script — rules below
 
-**Happy Path - All Endpoints requests**: status-only assertion, valid body, no negatives.
+**Happy Path - All Endpoints requests**: status-only assertion, valid body, no negatives. Iterate the audited flow list from Phase 3 **in order** so the resulting folder is top-to-bottom runnable.
 - `name`: `<METHOD> <path>` exactly (no prefix, no status suffix)
 - Test script:
   ```js

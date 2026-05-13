@@ -50,6 +50,14 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 - **Accept Scalar / Swagger UI / Redoc reference pages as spec sources, not just raw OpenAPI JSON/YAML.** When the user provides a URL that returns HTML, both `/qa-api-test-setup` (Phase 2a) and `/qa-api-sync` (Phase 1a) must auto-discover the underlying spec by looking at: Scalar embed (`<script id="api-reference" data-url="...">`), inline Scalar (`<script id="api-reference" type="application/json">`), Redoc embed (`<redoc spec-url="...">`), Swagger UI config (`url:`/`urls:` inside script blocks), and conventional paths (`/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/api/openapi.json`, `/api-docs`, `/v3/api-docs`). If discovery fails, ask the user once for the raw spec URL.
 - **Mandatory endpoint count print after loading any spec.** After a successful spec load in `/qa-api-test-setup` Phase 2b and `/qa-api-sync` Phase 1b, print a fixed summary block to the user (source, resolved spec URL, OpenAPI version, total endpoints, per-tag module counts, auth schemes — and for sync, delta vs snapshot). This is non-skippable. **Hard stop if total endpoints = 0.**
 
+### Dependency-aware ordering (audit pass)
+
+- **Before building any collection, run a dependency audit over the in-scope endpoints** (whole spec for `/qa-api-test-setup`, ticket-scoped endpoints for `/qa-test-ticket`). Build a DAG from four signals: (a) `security: [bearerAuth]` → depends on login chain; (b) path params like `{userId}` → depends on a producer (a `POST` whose response carries `userId`); (c) request body referencing another resource ID → depends on producer of that ID; (d) verb-within-resource order: `POST` → `GET /list` → `GET /<id>` → `PUT/PATCH` → `DELETE`. Topological sort the DAG.
+- **The audit drives two orderings**: (1) the order of requests inside `Happy Path - All Endpoints`, (2) the `NN.` index of top-level module folders in the main collection. Inside each module's `Positive` / `Negative` sub-folders, order is unchanged — TC numbering follows the existing rules, no reorder.
+- **Orphans**: if a dependency cannot be auto-resolved (e.g. `{auditLogId}` has no producer in the spec), the endpoint is placed at the end of its folder with a `{{test<Entity>Id}}` placeholder, and listed in the plan's orphan block for the user to wire up manually. Never block the build for orphans.
+- **One confirm gate, not two**: the audited order is folded into the existing Phase 4 plan (setup) / Phase 3 plan (ticket). User responds `y` / `n` / `edit`. No separate audit-confirm step.
+- **`/qa-api-sync` does not re-audit existing endpoints or renumber modules** — only newly ADDED endpoints get audited against the existing Happy Path order and inserted at their correct dependency slot. Renumbering existing modules mid-project would scramble TC IDs the team is already referencing.
+
 ### Happy Path folder
 
 - **`Happy Path - All Endpoints`** is the first top-level folder in every collection (main and ticket). It holds exactly one valid-data request per `(method, path)` in scope.
@@ -80,6 +88,7 @@ Full details are in `.claude/commands/qa-api-test-setup.md`, `qa-test-ticket.md`
 
 - `Happy Path - All Endpoints` sits **alongside** the module folders (not replacing them). It contains one valid-data request per spec endpoint, named `<METHOD> <path>` exactly (no `HP`/`TC` prefix, no status suffix). Status-only assertions. Login goes here too (first request) so `accessToken` is set before downstream Happy Path calls.
 - Module names come from OpenAPI spec `tags` (never hardcoded).
+- Module `NN.` index reflects **audited dependency-flow order** from `/qa-api-test-setup` Phase 2d, not spec-tag order. Auth/signup modules float to the top; downstream modules get later indices. `/qa-api-sync` does NOT renumber existing modules — new tags added during sync get appended as the next available `NN.`.
 - TC numbering **resets per module**; continuous across Positive → Negative within one module. Happy Path requests are not TC-numbered.
 - Both sub-folders always exist per module, even if one has a single test.
 - Every endpoint gets: one entry in Happy Path + at least one happy path in its module's Positive + at least one no-auth → 401 negative.

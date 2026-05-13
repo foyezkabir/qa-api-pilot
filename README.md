@@ -43,11 +43,12 @@ It will:
 2. Read your `.env` (or create one if missing).
 3. Ask for missing pieces: project name, OpenAPI spec source, auth type, login credentials, Postman workspace.
 4. Read the OpenAPI spec — accepts raw OpenAPI JSON/YAML URLs **or Scalar / Swagger UI / Redoc reference pages** (auto-discovers the underlying spec). After loading, prints a mandatory summary block: source, OpenAPI version, **total endpoint count**, per-tag module counts, auth schemes.
-5. Plan the collection structure, ask you to confirm.
-6. Build the main Postman collection: a top-level `Happy Path - All Endpoints` smoke folder plus one folder per module with `Positive` + `Negative` sub-folders.
-7. Export the collection JSON locally.
-8. Create `newman-env.json` and `run-tests.sh`.
-9. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
+5. **Run a dependency audit** to figure out the right execution flow — auth endpoints (register, login) run first, endpoints that need a `{{testOrderId}}` run after the `POST /orders` that produces it, etc. Spec-tag order is ignored. Endpoints whose dependencies can't be resolved are flagged as orphans and placed at the end with `{{test<Entity>Id}}` placeholders.
+6. Plan the collection structure with the audited flow order baked in, ask you to confirm (`y` / `n` / `edit`).
+7. Build the main Postman collection: a top-level `Happy Path - All Endpoints` smoke folder in dependency order, plus one folder per module (`NN.` index reflects flow order, not spec-tag order) with `Positive` + `Negative` sub-folders.
+8. Export the collection JSON locally.
+9. Create `newman-env.json` and `run-tests.sh`.
+10. Write the initial `api-snapshot-YYYY-MM-DD.json` baseline.
 
 ### Day 2 onwards: Spec stays in sync automatically
 
@@ -69,9 +70,10 @@ It will:
 1. Run `/qa-api-sync` first to make sure the spec is current.
 2. Pull the ticket from Jira (or accept pasted content if Atlassian plugin is not connected).
 3. Hard-stop if any credentials it needs are not in `.env`, and ask you to provide them.
-4. Plan a Setup / Happy Path - All Endpoints / Positive / Negative folder structure.
-5. Build a standalone collection named `PROJ-123: <feature name>` in the same workspace.
-6. Run Newman, produce an HTML report.
+4. **Run a dependency audit** scoped to just the endpoints this ticket touches, ordering them into a valid run flow (Setup-created entities count as producers).
+5. Plan a Setup / Happy Path - All Endpoints / Positive / Negative folder structure with the audited flow baked into Happy Path, ask you to confirm.
+6. Build a standalone collection named `PROJ-123: <feature name>` in the same workspace.
+7. Run Newman, produce an HTML report.
 
 ---
 
@@ -146,8 +148,9 @@ The main collection has a top-level **`Happy Path - All Endpoints`** folder (a q
 ```
 
 Key properties:
-- **`Happy Path - All Endpoints`** is a fast smoke pass. One valid-data request per `(method, path)`, named `<METHOD> <path>` exactly. Status-only assertion (`2xx`). Login goes here too (first request) so `accessToken` is populated for the rest of the folder. This folder is in addition to — not replacing — the module folders.
+- **`Happy Path - All Endpoints`** is a fast smoke pass. One valid-data request per `(method, path)`, named `<METHOD> <path>` exactly. Status-only assertion (`2xx`). Requests are ordered by the **dependency audit** (`POST /auth/login` runs before `GET /profile`, `POST /orders` runs before `GET /orders/{id}`, etc.), not by spec order. This folder is in addition to — not replacing — the module folders.
 - Module names are NOT hardcoded - they come from your OpenAPI spec's `tags`. For an e-commerce API you might see `Products`, `Orders`, `Customers`. For a CMS API: `Content`, `Users`, `Media`. The agent reads the spec and uses what's there.
+- **Module `NN.` index reflects audited flow order, not spec order.** Auth/signup modules float to `00.`/`01.`, modules that only depend on others get later indices. `/qa-api-sync` does not renumber existing modules — new tags added later get appended with the next available index.
 - If the spec has no tags, the agent asks you how to group endpoints.
 - **TC numbering resets per module.** Each module starts at TC01. Numbers are continuous across Positive → Negative within a module (e.g. Positive ends at TC04, Negative starts at TC05). Happy Path requests are not TC-numbered.
 - **Every endpoint gets at least one negative test** (no-auth → 401) in its module's Negative sub-folder. Additional negatives (400/404/409/422) added where the spec or context warrants.

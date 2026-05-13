@@ -318,6 +318,87 @@ Now extract for planning:
 
 Scan the spec completely before planning.
 
+### 2d — Dependency audit and flow ordering
+
+The order endpoints appear in the spec is rarely a valid execution order. `GET /profile` listed before `POST /auth/login` will fail at runtime because the token doesn't exist yet. Before building anything, the agent runs **one dependency audit pass** over the whole spec and produces:
+
+1. A **flow-ordered list of every endpoint** — used to build the `Happy Path - All Endpoints` folder.
+2. A **flow-ordered list of modules** — derived from (1) by collapsing endpoints to their containing tag. Used to assign the `NN.` prefix on module folders. So if the first endpoint in flow order is `POST /auth/register`, the `Auth` module becomes `00. Auth`. If the next new module touched is `Users`, it becomes `01. Users`, etc.
+
+**Inputs to the dependency graph** (build edges from each signal — edge "A → B" means A must run before B):
+
+| Signal | Edge logic |
+|---|---|
+| Endpoint has `security: [bearerAuth]` (or equivalent JWT scheme) | Depends on the login chain. Find the auth endpoints (`POST /auth/register`, `POST /auth/login`, or whatever Phase 1d's `LOGIN_PATH` resolved to) and add edges from them to this endpoint. |
+| Path param like `{userId}`, `{orderId}`, `{id}` | Find the most likely producer: a `POST` endpoint whose `2xx` response schema contains a matching ID field (`userId`/`id` returned by `POST /users` → producer for `{userId}`). Add edge producer → consumer. If the param is generic `{id}` and the path is `/orders/{id}`, look for `POST /orders` (same resource path prefix) and the `id` returned in its response. |
+| Request body references another resource by ID (e.g. `POST /orders` body requires `customerId`) | Find the producer for that ID (`POST /customers` returning `id`). Add edge producer → consumer. |
+| Same resource, multiple verbs | Default ordering inside one resource: `POST /resource` (create) → `GET /resource` (list) → `GET /resource/{id}` (read) → `PUT /resource/{id}` / `PATCH /resource/{id}` (update) → `DELETE /resource/{id}` (delete last). List endpoints (`GET /resource`) usually go right after create. |
+
+**Sort:**
+
+Run a topological sort on the DAG. If a cycle is detected (rare), break it by warning the user and falling back to spec order for the cycle members.
+
+**Module-order derivation:**
+
+Walk the flow-ordered endpoint list once. The first time you encounter an endpoint belonging to a tag, that tag claims the next available `NN.` index. So module ordering naturally reflects flow: auth-related modules float to the top, modules that only get touched late stay at the bottom. Untagged endpoints group under a module named `Untagged` placed wherever its first member lands in flow.
+
+**Orphans (could not auto-resolve):**
+
+If a path param or body field can't be matched to a producer (e.g. `GET /admin/audit-log/{auditLogId}` exists but no endpoint produces `auditLogId`), do **not** block. Place the endpoint **at the end of the flow** with a placeholder variable (`{{testAuditLogId}}` derived from the param name), and add it to the **orphan list** which gets printed in Phase 4's plan. The user fixes wiring manually after.
+
+**Output the agent holds going into Phase 4:**
+
+Each audited entry must capture both what it **needs** (with the producer's flow-index for citation) and what it **produces** — these are surfaced inline in the Phase 4 plan so the user can read the agent's reasoning and catch mistakes without going line-by-line.
+
+```
+auditedFlow = [
+  { idx: 1, method:"POST", path:"/auth/register", module:"Auth",
+    needs: [],                                              // entry; no deps
+    needsFrom: [],                                          // producer indices, for plan citation
+    produces: ["userId"] },
+
+  { idx: 2, method:"POST", path:"/auth/login",    module:"Auth",
+    needs: ["registered user"],
+    needsFrom: [1],
+    produces: ["accessToken", "refreshToken"] },
+
+  { idx: 3, method:"GET",  path:"/profile",       module:"Profile",
+    needs: ["accessToken"],
+    needsFrom: [2],
+    produces: [] },
+
+  { idx: 5, method:"POST", path:"/orders",        module:"Orders",
+    needs: ["accessToken"],
+    needsFrom: [2],
+    produces: ["testOrderId"] },
+
+  { idx: 6, method:"GET",  path:"/orders/{id}",   module:"Orders",
+    needs: ["testOrderId"],
+    needsFrom: [5],
+    produces: [] },
+  ...
+]
+
+orphans = [
+  { method:"GET",  path:"/admin/audit-log/{auditLogId}",
+    missing:"testAuditLogId",
+    reason:"no endpoint in spec produces auditLogId" },
+  ...
+]
+
+auditedModules = [
+  { index:"00", tag:"Auth",    originalSpecIndex:3,
+    reason:"entry chain; no prerequisites" },
+  { index:"01", tag:"Users",   originalSpecIndex:1,
+    reason:"needs auth from 00. Auth" },
+  { index:"02", tag:"Profile", originalSpecIndex:7,
+    reason:"needs user created in 01. Users" },
+  ...
+]
+```
+
+These three structures feed Phase 4's plan (where `needs`/`needsFrom`/`produces`/`reason` are rendered inline next to each entry), Phase 5b's folder creation, and Phase 5c's Happy Path build.
+
 ---
 
 ## Phase 3 — Read Confluence (if available)
@@ -366,7 +447,7 @@ Decide the structure using the **nested module / test-type pattern**:
 ### Rules
 
 - **Happy Path - All Endpoints** is a top-level folder, always created first, alongside (not replacing) the module folders. It contains exactly one valid-data request per `(method, path)` in the spec — no negatives. Purpose: a fast smoke pass across the entire API in one folder. See Phase 5b/5c for build details.
-- **Top-level module folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded order in the spec. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
+- **Top-level module folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded **audited flow order** from Phase 2d (NOT spec-tag order). So auth/signup modules float to `00.`/`01.`, downstream modules get later numbers. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
 - **Sub-folders** = always two under each module: `Positive` and `Negative`. Always create both, even if one starts with a single test.
 - **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<METHOD> <path>`.
 - **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND at least one auth-failure negative (no auth → 401) in its module's `Negative`. Add more negatives where the spec or context warrants:
@@ -384,11 +465,29 @@ Plan for <ProjectName> API
 Total endpoints in spec: <N>
 Modules detected from spec tags: <M>
 
-Happy Path - All Endpoints (<N>):
-  POST /auth/login
-  GET  /orders
-  POST /orders
+Module ordering (audited flow order — reordered from spec, with reasoning):
+  00. Auth          (was 03 in spec)   — entry chain; no prerequisites
+  01. Users         (was 01)            — needs auth from 00. Auth
+  02. Profile       (was 07)            — needs user created in 01. Users
+  03. Orders        (was 04)            — needs user from 01. Users + auth
+  04. Reports       (was 06)            — reads from 03. Orders
   ...
+
+Happy Path - All Endpoints (<N>, audited flow order, with reasoning):
+   1. POST /auth/register                  — entry; produces {{userId}}
+   2. POST /auth/login                     — needs registered user (#1); produces {{accessToken}}, {{refreshToken}}
+   3. GET  /profile                        — needs {{accessToken}} (#2)
+   4. PUT  /profile                        — needs {{accessToken}} (#2)
+   5. POST /orders                         — needs {{accessToken}} (#2); produces {{testOrderId}}
+   6. GET  /orders/{id}                    — needs {{testOrderId}} (#5)
+   7. PATCH /orders/{id}                   — needs {{testOrderId}} (#5)
+   8. POST /orders/{id}/cancel             — needs {{testOrderId}} (#5)
+   ...
+ 158. DELETE /admin/audit-log/{id}         ⚠ orphan: no producer for {auditLogId}, placed at end
+
+Orphans (placed at end with placeholder vars, fix wiring manually if needed):
+  - GET /admin/audit-log/{auditLogId}    needs: {{testAuditLogId}}   reason: no endpoint in spec produces auditLogId
+  - POST /webhooks/{webhookId}/retry      needs: {{testWebhookId}}    reason: no endpoint in spec produces webhookId
 
 00. <Module1>
   Positive (<N>):
@@ -416,9 +515,10 @@ Variable-setting requests:
   - ...
 ```
 
-Ask:
-
-> Does this look right, or any changes?
+The plan reflects the audited flow order from Phase 2d. **`Does this flow look right?` is the only confirm gate** — there is no separate audit confirm. If the user replies:
+- `y` → proceed to build (Phase 5).
+- `n` → ask what's wrong, rerun the audit with their correction (e.g. they identify a producer the agent missed), reprint the plan.
+- `edit` → ask which entry to move (`move <endpoint> after <other endpoint>`) or which orphan to wire up (`wire {{testAuditLogId}} from POST /admin/audit-log`). Apply, reprint.
 
 **Wait for confirmation before building.**
 
@@ -443,13 +543,15 @@ Save the returned collection ID.
 
 Call `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `Happy Path - All Endpoints` and no `parentFolderId`. Save the returned ID as `happyPathFolderId`. This is the first folder so it sits at the top of the collection.
 
-**Step 2 — Module folders (two levels deep):**
+**Step 2 — Module folders (two levels deep), in audited flow order:**
 
-For each module from Phase 4's plan:
+Iterate `auditedModules` from Phase 2d **in order** (index 00 → 01 → …). For each module:
 
-1. Create the top-level module folder via `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `<NN>. <ModuleName>`. Save the returned folder ID as `<module>ModuleFolderId`.
+1. Create the top-level module folder via `mcp__plugin_postman_postman__createCollectionFolder` with `name`: `<NN>. <ModuleName>` where `<NN>` is the audited index. Save the returned folder ID as `<module>ModuleFolderId`.
 2. Create the `Positive` sub-folder under it via the same MCP call but with `parentFolderId: <module>ModuleFolderId`. Save the returned ID as `<module>PositiveFolderId`.
 3. Create the `Negative` sub-folder the same way. Save ID as `<module>NegativeFolderId`.
+
+Order matters here — Postman renders folders in creation order. Creating in audited order is what gives the user a top-to-bottom-runnable collection.
 
 After all folders are created, you should have a map like:
 ```
@@ -470,9 +572,9 @@ After all folders are created, you should have a map like:
 
 Build in two passes.
 
-**Pass 1 — Happy Path - All Endpoints (build first):**
+**Pass 1 — Happy Path - All Endpoints (build first, in audited flow order):**
 
-For every `(method, path)` in the spec, create one request via `mcp__plugin_postman_postman__createCollectionRequest`:
+Iterate `auditedFlow` from Phase 2d **in order**. For each entry, create one request via `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: `happyPathFolderId`
 - `name`: `<METHOD> <path>` exactly (e.g. `POST /auth/login`, `GET /orders/{id}`). No `HP` prefix, no `TC` prefix, no status suffix.
 - `method`, `url` from spec — host as `{{baseUrl}}`. Path params like `{id}` resolve to chained variables like `{{testOrderId}}` if a prior request creates that entity; otherwise leave as-is for the user to wire up.
@@ -485,7 +587,7 @@ For every `(method, path)` in the spec, create one request via `mcp__plugin_post
   });
   ```
   No deep schema checks — that's what the per-module Positive folder is for. Happy Path is the smoke pass.
-- **Variable chaining still applies**: if the endpoint is the login or creates an entity, include the same `pm.collectionVariables.set(...)` block as Pass 2 below so downstream Happy Path requests can use the IDs/tokens. The login endpoint MUST appear first in Happy Path (reorder if needed) so `accessToken` is set before any other request runs.
+- **Variable chaining still applies**: if the endpoint is the login or creates an entity, include the same `pm.collectionVariables.set(...)` block as Pass 2 below so downstream Happy Path requests can use the IDs/tokens. The audit from Phase 2d guarantees the login endpoint runs before any token-protected endpoint, so by the time Pass 1 reaches `GET /profile`, `{{accessToken}}` is already set.
 
 **Pass 2 — Module Positive / Negative requests:**
 
