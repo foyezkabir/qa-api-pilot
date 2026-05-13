@@ -26,6 +26,7 @@ Clone it as the starting point for a new QA project, run the setup command, and 
   - <a href="#ticket-collection-folder-structure" style="text-decoration: none;">Ticket-collection folder structure</a>
   - <a href="#qa-api-sync" style="text-decoration: none;"><code>/qa-api-sync</code></a>
   - <a href="#qa-negative-audit" style="text-decoration: none;"><code>/qa-negative-audit</code></a>
+  - <a href="#qa-negative-matrixmd--the-shared-reference-doc" style="text-decoration: none;"><code>qa-negative-matrix.md</code> — the shared reference doc</a>
 - <a href="#scheduling-deep-dive" style="text-decoration: none;">Scheduling deep-dive</a>
 - <a href="#project-files" style="text-decoration: none;">Project files</a>
 - <a href="#how-the-template-flow-works" style="text-decoration: none;">How the template flow works</a>
@@ -472,6 +473,35 @@ Flags:
 - `--include-rate-limit` — override `INCLUDE_RATE_LIMIT_TESTS=false` for one run (use with care — destructive)
 
 The audit **never modifies or deletes existing tests**. It only adds missing ones. Renumbering or removing requires explicit human action. This makes it safe to run on any collection — worst case, it does nothing because everything is already covered.
+
+### `qa-negative-matrix.md` — the shared reference doc
+
+**Not a command** — you never invoke it. It's a **reference file** that the four agents (`/qa-api-test-setup`, `/qa-test-ticket`, `/qa-api-sync`, `/qa-negative-audit`) all read from to decide what negative tests to generate.
+
+Think of it as the **contract** for negative-test coverage. Edit it once, and the next time any of the four commands runs, the change takes effect everywhere.
+
+**What's in it (24 rows total):**
+
+- **5 Auth Failures** — no-auth, expired token, tampered token, malformed token, wrong-role
+- **5 Validation Failures** — missing required, wrong type, out-of-range, regex mismatch, enum out-of-range
+- **3 Resource Errors** — non-existent ID, wrong-state, conflict
+- **5 Security Probes** — SQL injection, XSS reflection, path traversal, CORS preflight, rate-limit (opt-in)
+- **6 Cross-cutting assertions** — response time, schema validation, sensitive-data leak, error body structure, no stack trace, idempotency (these are added INTO existing test scripts, not as separate tests)
+
+Per row: a **condition** (when it applies to an endpoint), an **expected status**, and a **Postman test-script template**. Agents walk every row per endpoint and either generate the test or mark the row `n/a (condition not met)` — nothing is mentally skipped.
+
+**When you'd edit it:**
+
+- A new XSS payload gets added to your team's threat model → update the `sec-xss-reflection` row's payload list.
+- Your API uses a non-standard error body shape → update the `xcut-error-body-shape` assertion to match your project's contract.
+- A new negative category emerges → add a new row with its condition, expected status, and test script.
+
+**When you'd NOT edit it:**
+
+- A single endpoint needs a one-off custom negative → write it manually in the collection. Don't add a row that only applies to one endpoint.
+
+> [!TIP]
+> Because all four agents source this file at runtime, the matrix is the **single point of change** for project-wide negative testing. You don't have to remember to update setup, ticket, sync, AND audit separately — edit the matrix, every command picks up the change on its next run.
 
 ---
 
