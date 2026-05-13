@@ -934,7 +934,7 @@ Report:           <path>/newman-reports/<file>.html
 Spec snapshot:    <path>/api-snapshot-<today>.json  (<N> endpoints baselined)
 
 Next steps:
-  - Run /qa-api-sync daily, or schedule it: /schedule daily at 2:30 PM BDT /qa-api-sync
+  - Run /qa-api-sync daily, or schedule it: /schedule daily at <user's preferred time> <user's timezone> /qa-api-sync
   - Run /qa-test-ticket <KEY> when a new Jira ticket needs scoped tests
 
 Fixes needed (if any):

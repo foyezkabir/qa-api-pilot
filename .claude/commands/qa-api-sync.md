@@ -11,7 +11,7 @@ This command only runs in a project already set up via `/qa-api-test-setup`. It 
 
 Invocation:
 - Manual: `/qa-api-sync`
-- Scheduled (runs even when Claude Code is closed): `/schedule daily at 2:30 PM BDT /qa-api-sync`
+- Scheduled (runs even when Claude Code is closed): `/schedule daily at <user's local time> <user's timezone> /qa-api-sync` — derive the timezone from the project's CLAUDE.md "Today's date and timezone" section if present, else ask the user once.
 - Auto-called from `/qa-test-ticket <KEY>` Phase 0 as a prerequisite
 
 ---

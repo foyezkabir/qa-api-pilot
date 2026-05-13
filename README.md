@@ -39,6 +39,66 @@ If any plugin is missing when you run `/qa-api-test-setup`, Phase 0 will stop an
 
 ## Full workflow
 
+A 30-second visual orientation before the narrative below.
+
+### Data flow
+
+```
+                  ┌───────────────────────────────┐
+                  │   OpenAPI spec                 │  URL or local file
+                  │   (Scalar / Swagger UI /       │
+                  │    Redoc / raw JSON-YAML)       │
+                  └───────────────┬───────────────┘
+                                  │ read
+                                  ▼
+       ┌─────────────────────────────────────────────────────┐
+       │   /qa-api-test-setup     (one-time, day 1)            │
+       │   • dependency audit + flow order                      │
+       │   • negative matrix per endpoint                       │
+       │   • module-wise batched build                          │
+       └────────────────────────┬────────────────────────────┘
+                                │ writes
+                                ▼
+   ┌──────────────────────────────────────────────────────────────┐
+   │  <project-slug>-collection.json    (cloud + local mirror)     │
+   │  <ProjectName> Environment          (cloud, shared by all)    │
+   │  newman-env.json                    (local mirror of env)     │
+   │  api-snapshot-YYYY-MM-DD.json        (drift baseline)          │
+   │  run-tests.sh, generate-issues.py    (rendered from templates) │
+   │  collection-run-issues/*-coverage-*  (coverage report)         │
+   └──────────────────────────────────────────────────────────────┘
+                                │ read by
+              ┌─────────────────┼────────────────────┐
+              ▼                 ▼                    ▼
+  ┌──────────────────┐  ┌────────────────┐   ┌──────────────────────┐
+  │  /qa-api-sync     │  │ /qa-test-      │   │  /qa-negative-audit  │
+  │  (daily, auto)    │  │ ticket <KEY>   │   │  (on-demand)         │
+  │                   │  │ (per Jira      │   │                      │
+  │ patches spec      │  │  ticket)       │   │ reads collection +   │
+  │ drift into        │  │                │   │ matrix → reports     │
+  │ collection +      │  │ creates        │   │ coverage gaps →      │
+  │ env + bumps       │  │ <KEY>-         │   │ fills them in        │
+  │ snapshot date     │  │ collection,    │   │ module-wise batches  │
+  │                   │  │ shares the     │   │ with checkpoint      │
+  │                   │  │ project env    │   │ resume               │
+  └──────────────────┘  └────────────────┘   └──────────────────────┘
+                                │
+                                ▼
+                    Newman runs the collection
+                                │
+                                ▼
+              newman-reports/*.html + collection-run-issues/*.txt
+```
+
+### When to run what
+
+```
+spec changed?            ─►  /qa-api-sync                (or via daily /schedule — see Scheduling deep-dive)
+new Jira ticket lands?   ─►  /qa-test-ticket <KEY>       (auto-runs /qa-api-sync first)
+coverage health check?   ─►  /qa-negative-audit          (suggested by sync output when relevant)
+suite broken / rebuild?  ─►  /qa-api-test-setup force re-setup  (last resort; nukes generated files)
+```
+
 ### Day 1: First-time setup
 
 Before running anything, make sure your Postman API key is reachable. **Two options — pick one** (see the [`.env` keys section](#env-keys) for full detail):
@@ -70,12 +130,13 @@ It will:
 
 ### Day 2 onwards: Spec stays in sync automatically
 
-Schedule the daily sync once (see the Scheduling section below):
+Schedule the daily sync once (see the Scheduling section below for full syntax):
 ```
-/schedule daily at 2:30 PM BDT /qa-api-sync
+/schedule daily at <your local time> <your timezone> /qa-api-sync
+# example: /schedule daily at 2:30 PM EST /qa-api-sync
 ```
 
-From this point on, the agent runs every day at 2:30 PM Bangladesh time and keeps your main collection up to date with whatever the dev team ships. Like the setup command, it auto-discovers the spec from Scalar/Swagger UI/Redoc pages if needed and prints the mandatory endpoint-count block (including delta vs the snapshot) before applying any changes.
+From this point on, the agent runs every day at your chosen time and keeps your main collection up to date with whatever the dev team ships. Like the setup command, it auto-discovers the spec from Scalar/Swagger UI/Redoc pages if needed and prints the mandatory endpoint-count block (including delta vs the snapshot) before applying any changes.
 
 ### When a new Jira ticket lands
 
@@ -314,7 +375,7 @@ What it does:
 
 Invocation modes:
 - Manual: `/qa-api-sync`
-- Scheduled (runs even when Claude Code is closed): `/schedule daily at 2:30 PM BDT /qa-api-sync`
+- Scheduled (runs even when Claude Code is closed): `/schedule daily at <your local time> <your timezone> /qa-api-sync`
 - Auto-called as Phase 0 of `/qa-test-ticket <KEY>`
 
 ### `/qa-negative-audit`
@@ -350,19 +411,22 @@ The `/schedule` skill is a built-in Claude Code feature that runs slash commands
 
 ### One-time setup (do this once, manually by yourself)
 
-The first time, you have to register the schedule yourself. Open any Claude Code session inside this project and type this exactly:
+The first time, you have to register the schedule yourself. Open any Claude Code session inside this project and type something like (pick the time + timezone that fits your team):
 
 ```
-/schedule daily at 2:30 PM BDT /qa-api-sync
+/schedule daily at <your local time> <your timezone> /qa-api-sync
+# concrete example: /schedule daily at 2:30 PM EST /qa-api-sync
 ```
 
 Hit enter. The `/schedule` skill will confirm the schedule was created and give you back a schedule ID. That is it - you are done. No further action from you.
+
+> **Picking a time**: aim for a low-traffic window after your dev team's main push cadence. If devs deploy at lunch, schedule after that. If they deploy end-of-day, schedule overnight. The default expectation is roughly "once per day, off-peak".
 
 ### What happens from the next day onwards (automatic)
 
 Once that one-time command is registered, the system takes over:
 
-- Every day at 2:30 PM Bangladesh time, `/qa-api-sync` fires by itself.
+- Every day at your scheduled time, `/qa-api-sync` fires by itself.
 - It runs even when Claude Code is closed, your laptop is shut, or you are on leave.
 - It pulls the latest OpenAPI spec, diffs it against the snapshot, updates the main collection, refreshes any affected ticket collections, archives removed endpoints, and rewrites the snapshot file with today's date.
 - When you next open Claude Code, you can see what the run did via `/schedule list` (it shows the latest run output for each scheduled agent).
@@ -371,34 +435,36 @@ You only need to repeat the setup command if you want to change the time, change
 
 ### `/schedule` examples (pick the cadence that fits)
 
-1. **Once a day at 2:30 PM BDT** (the standard, recommended for most teams):
+Replace `<TZ>` with your timezone (e.g. `EST`, `IST`, `BDT`, `CET`, `PT`).
+
+1. **Once a day off-peak** (the standard, recommended for most teams):
    ```
-   /schedule daily at 2:30 PM BDT /qa-api-sync
+   /schedule daily at 2:30 PM <TZ> /qa-api-sync
    ```
 
 2. **Twice a day - morning standup + end of dev day** (good when devs ship multiple times daily):
    ```
-   /schedule daily at 9 AM and 5 PM BDT /qa-api-sync
+   /schedule daily at 9 AM and 5 PM <TZ> /qa-api-sync
    ```
 
 3. **Weekdays only, skip weekends** (no point running on Sat/Sun if no one is shipping):
    ```
-   /schedule weekdays at 10 AM BDT /qa-api-sync
+   /schedule weekdays at 10 AM <TZ> /qa-api-sync
    ```
 
 4. **Hourly during work hours** (intense sprint, lots of API churn):
    ```
-   /schedule hourly 9 AM to 6 PM BDT on weekdays /qa-api-sync
+   /schedule hourly 9 AM to 6 PM <TZ> on weekdays /qa-api-sync
    ```
 
 5. **Weekly Monday morning** (slow-moving APIs, light cadence):
    ```
-   /schedule every Monday at 9 AM BDT /qa-api-sync
+   /schedule every Monday at 9 AM <TZ> /qa-api-sync
    ```
 
 You can also combine `/schedule` with other commands - for example, auto-running tests after every sync:
 ```
-/schedule daily at 2:30 PM BDT ./run-tests.sh
+/schedule daily at 2:30 PM <TZ> ./run-tests.sh
 ```
 
 ### Manual run (any time)
@@ -432,7 +498,8 @@ You can also confirm it ran by looking at the snapshot file in the project root 
 ### How to change the time
 
 ```
-/schedule update <id> daily at 9:00 AM BDT /qa-api-sync
+/schedule update <id> daily at <new local time> <your timezone> /qa-api-sync
+# concrete example: /schedule update <id> daily at 9:00 AM EST /qa-api-sync
 ```
 
 Replace `<id>` with the schedule ID shown by `/schedule list`. The new time applies starting from the next scheduled run.
