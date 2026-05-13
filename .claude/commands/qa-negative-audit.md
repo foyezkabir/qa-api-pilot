@@ -17,6 +17,28 @@ When to run:
 
 ---
 
+## Hard invariants (must hold throughout this run)
+
+Re-read these before each module batch and at the start of every Phase 5 fill iteration. If a phase instruction ever seems to contradict one, the invariant wins.
+
+ 1. **NEVER modify or delete existing tests.** The audit is additive-only. If an existing test looks wrong, flag it in the report — let the user decide. Silent edits hide regressions.
+ 2. **NEVER renumber existing TC numbers.** New tests get the next available TC number after the existing maximum. Renumbering scrambles references everyone has memorized.
+ 3. **NEVER touch the spec.** This command never modifies the OpenAPI source.
+ 4. **NEVER generate rate-limit tests** if `INCLUDE_RATE_LIMIT_TESTS=false` in `.env`, unless `--include-rate-limit` flag is explicitly passed for this run. Mark as `skipped (env flag)` in the report so the gap stays visible.
+ 5. **NEVER overwrite a cross-cutting assertion block** that already exists in a test script. Detect existing blocks and skip — idempotent.
+ 6. **NEVER `--bail`** if you run a Newman verification pass after generation. Full run only.
+ 7. **ALWAYS walk every matrix row** per endpoint. Each row resolves to one of: `✓ covered (TC<NN>)`, `✗ missing`, `n/a (condition not met)`, `skipped (env flag)`. No mental skipping.
+ 8. **ALWAYS write checkpoint** to `.audit-progress.json` after each module completes — so the next invocation resumes from where it left off if interrupted.
+ 9. **ALWAYS re-export** local `<project-slug>-collection.json` after fill batches. Newman reads the local file.
+10. **ALWAYS write the coverage report file** to `collection-run-issues/<slug>-coverage-<timestamp>.txt` — regardless of `--report-only` vs full-fill mode.
+11. **ALWAYS verify the shared `<ProjectName> Environment` exists** at Phase 0b. If missing, warn the user and offer to recreate it before continuing.
+
+If the checkpoint disagrees with what's actually in the collection (e.g. user deleted tests manually), trust the live collection and update the checkpoint, but warn the user about the discrepancy.
+
+If you catch yourself about to violate any invariant, stop and explain to the user. Do not silently proceed.
+
+---
+
 ## Phase 0 — Prereqs
 
 ### 0a — Postman plugin
@@ -27,7 +49,17 @@ When to run:
 
 Load `.env`. Required keys: `BASE_URL`, `OPENAPI_SPEC`. If missing → tell user to run `/qa-api-test-setup` first.
 
-Check the main collection exists. Locate `<project-slug>-collection.json` in the project root. If missing → stop and tell user: `No main collection found. Run /qa-api-test-setup first.`
+Check the main collection exists. Locate `<project-slug>-collection.json` in the project root. If missing → check if this is foundation-only state (shared infra present + `Jira Tickets/` folder may exist but no main collection):
+
+```bash
+if [ -f .env ] && [ -d "Jira Tickets" ] && [ ! -f <project-slug>-collection.json ]; then
+  echo "Foundation-only project — main suite not built yet."
+fi
+```
+
+If foundation-only → stop and tell user: `Foundation-only project detected. /qa-negative-audit needs the main collection to audit against. Run /qa-api-test-setup first (it will reuse your existing shared infrastructure).` and exit.
+
+If neither main collection nor shared infra → stop with: `No main collection found. Run /qa-api-test-setup first.`
 
 Check the negative matrix reference exists: `.claude/commands/qa-negative-matrix.md`. If missing → stop and tell user the matrix doc is the contract; nothing to audit against without it.
 
@@ -120,7 +152,7 @@ Example:
 
 ```
 Negative coverage audit — <Project Name>
-Snapshot: <api-snapshot-YYYY-MM-DD.json>
+Snapshot: <project-snapshot-YYYY-MM-DD.json>
 Total endpoints: 160
 Project coverage: 67% (438 covered / 654 applicable, 23 skipped)
 
@@ -221,15 +253,15 @@ Iterate modules in their existing `NN.` order (do NOT re-audit module ordering �
 
 ### 5b — Generate one test (the matrix call)
 
-For a missing row `<row-id>` on endpoint `<METHOD> <path>`:
+For a missing row `<row-id>` on endpoint `<METHOD> <path>` (identity key; not the display name):
 
-1. Look up the row in `.claude/commands/qa-negative-matrix.md` — get the test name pattern, expected status, test script template, and target sub-folder.
-2. Resolve the test name by substituting `<METHOD>`, `<path>`, and (if applicable) `<field>` placeholders.
+1. Look up the row in `.claude/commands/qa-negative-matrix.md` — get the row description, expected status, test script template, and target sub-folder.
+2. Resolve `<op.summary>` for the endpoint per the fallback chain in CLAUDE.md § Happy Path folder (summary → Title-Cased operationId → `<METHOD> <path>`). Substitute `<field>` placeholders inside the row description if applicable.
 3. Determine the next available TC number for this module (continuous across all four Negative sub-folders).
 4. Build the request:
    - `folderId`: the target sub-folder (`<module>Negative<Subfolder>FolderId`)
-   - `name`: `TC<NN>: <resolved test name>`
-   - `method`, `url`, headers: copied from the existing happy-path request for this endpoint, with the row's mutation applied (e.g. for `auth-no-token` → remove `Authorization` header; for `val-missing-required` → omit the field from body)
+   - `name`: `TC<NN>: <op.summary> - <row description> (<status>)` — example: `TC07: Login - No Auth (401)`. The display name is human-readable. NEVER use `<METHOD> <path>` in the display name unless it's the fallback case.
+   - `method`, `url`, headers: copied from the existing happy-path request for this endpoint (these stay as actual HTTP method and path — `POST`, `/api/v1/auth/login` — for the actual HTTP request; only the `name:` is humanized), with the row's mutation applied (e.g. for `auth-no-token` → remove `Authorization` header; for `val-missing-required` → omit the field from body)
    - `body`: same as happy-path, with mutation
    - `events`: test script from the matrix row template
 5. Call `mcp__plugin_postman_postman__createCollectionRequest`.
@@ -254,7 +286,6 @@ If the alt-user token isn't available and no `{{altUserAccessToken}}` env var ex
 After all the row-based negatives are generated for a batch, apply the cross-cutting assertions from the matrix (`xcut-sensitive-leak`, `xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-response-time`, `xcut-schema-validation`, `xcut-idempotency`):
 
 - For each existing positive AND negative test in this batch's modules, fetch the request via `getCollectionRequest`, append the cross-cutting assertions to the test script, and update via `updateCollectionRequest`.
-- These assertions are additive — never overwrite existing assertions.
 - If a test already has an identical cross-cutting block (e.g. from a previous audit run), skip — idempotent.
 
 ---
@@ -269,8 +300,6 @@ curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
   -o "<project-slug>-collection.json"
 ```
-
-Newman reads the local JSON. Out-of-sync = patches don't take effect.
 
 ---
 
@@ -314,15 +343,3 @@ Delete `.audit-progress.json` if the full run completed (no remaining work for a
 | `--verbose` | Show all rows in the report (covered, n/a, skipped, missing), not just gaps. |
 | `--reorganize` | One-shot pass: move loose tests at the root of `Negative` into the 4-way sub-folders based on test name. Skips matrix-driven generation. |
 | `--include-rate-limit` | Override `INCLUDE_RATE_LIMIT_TESTS=false` from `.env` for this run only. Use with caution — destructive on the API. |
-
----
-
-## Hard rules
-
-- **Do not modify or delete existing tests.** Audit only adds missing ones. If an existing test looks wrong, flag it in the report — let the user decide. Silent edits hide regressions.
-- **Do not renumber existing TCs.** New tests get the next available TC number after the existing max. Renumbering would scramble references everyone has memorized.
-- **Do not write to the spec.** This command never touches the OpenAPI source.
-- **Never `--bail` Newman.** If you run a verification Newman pass after generation, full run only.
-- **Checkpoint is the source of truth for resume state.** If the checkpoint disagrees with what's actually in the collection (e.g. user deleted tests manually), trust the live collection and update the checkpoint, but warn the user about the discrepancy.
-- **Cross-cutting assertions are additive.** Never overwrite an existing test script — always append. Detect duplicate cross-cutting blocks and skip.
-- **Rate-limit tests are opt-in only.** Default off. Setup asks once and persists to `.env`. This command honors the `.env` value unless `--include-rate-limit` is passed explicitly for one run.

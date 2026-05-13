@@ -16,6 +16,28 @@ The output is a **separate, standalone collection** inside the same Postman work
 
 ---
 
+## Hard invariants (must hold throughout this run)
+
+Re-read these before any batch operation, every auto-fix iteration, and at the end of each phase. If a phase instruction ever seems to contradict one, the invariant wins.
+
+ 1. **NEVER auto-create a Jira ticket** without a successful curl reproduction. Phase 9 is gated; bypassing the gate is forbidden regardless of priority.
+ 2. **NEVER `--bail`** Newman in Phase 5 (initial run) or Phase 6 (auto-fix iterations). Bailing leaves the HTML report incomplete. `--bail` is only for human-driven Phase 8 manual triage.
+ 3. **NEVER use `const`** at top scope in test scripts. Use `let`. Newman re-runs scripts; `const` throws `SyntaxError: Identifier already declared`.
+ 4. **NEVER write `POSTMAN_API_KEY`** or workspace ID to project `.env`. PMAK is in `.claude/settings.local.json` or `~/.claude/settings.json`; workspaces are listed fresh per run.
+ 5. **NEVER mix scopes** — ticket collections use `pm.environment.set(...)` for variable chaining (NOT `pm.collectionVariables.set`). Main project collection uses `pm.collectionVariables`. Don't cross the streams.
+ 6. **NEVER patch test assertions** during auto-fix (Phase 6). Only patch request setup (body, headers, env var population). Changing an assertion hides real bugs.
+ 7. **ALWAYS run `/qa-api-sync` first** as Phase 0d. A ticket built against stale spec produces false failures.
+ 8. **ALWAYS hard-stop** at the Phase 2 credential gate if the ticket needs credentials/IDs/data the agent doesn't have. No silent failures, no half-built collections.
+ 9. **ALWAYS re-export** the local `Jira Tickets/<KEY>/collection.json` after every Postman MCP write. Newman reads the local file.
+10. **ALWAYS patch the shared `<ProjectName> Environment`** (NOT a per-ticket env) for new chained vars. Dual-write to `newman-env.json`.
+11. **ALWAYS apply the full negative matrix** scoped to the ticket's endpoints (flat `Negative` folder — NOT the 4-way sub-folder split, that's main-collection only).
+12. **3-iteration cap on auto-fix** (Phase 6). After 3 rounds of unresolved failures, hand off to human via Phase 7 summary. Never loop indefinitely.
+13. **Mode A for positive bodies, Mode B for negatives.** Ticket AC values win as Mode A's source #2.
+
+If you catch yourself about to violate any of these, stop and explain to the user. Do not silently proceed.
+
+---
+
 ## Input normalization (parse the argument before Phase 0)
 
 Run this first - extract a clean ticket key from whatever the user passed.
@@ -34,15 +56,117 @@ From this point on, use only the extracted key everywhere downstream: collection
 
 ## Phase 0 — Prereq checks (silent)
 
-### 0a — `.env` must exist
+### 0a — `.env` and shared infrastructure
 
 ```bash
-test -f .env || (echo "MISSING" && exit 1)
+test -f .env
+test -f newman-env.json
+test -f run-tests.sh
+test -f generate-issues.py
 ```
 
-If missing → stop and tell user: `No .env in current directory. Run /qa-api-test-setup first.`
+**Case 1 — `.env` MISSING (fully fresh project)**: project hasn't been set up yet. Offer the 3-way prompt:
 
-Load `.env`. Required keys: `BASE_URL`, `OPENAPI_SPEC`, `LOGIN_EMAIL`, `LOGIN_PASSWORD`, `AUTH_TYPE`, `TOKEN_JSON_PATH`, `LOGIN_PATH`. If any required key is missing → stop and tell user which keys to add.
+> Working on ticket: **<KEY>** (parsed from <input>)
+>
+> Phase 0a check failed: no `.env` in current directory.
+> This project hasn't been set up yet. Three ways to proceed:
+>
+> **(a) Inline foundation (fastest path to testing this ticket)**
+>     I'll gather minimum config (~3 min), create:
+>       - .env
+>       - shared Postman environment + newman-env.json
+>       - run-tests.sh + generate-issues.py from templates
+>     Then build PROJ-123 in `Jira Tickets/<KEY>/`.
+>     
+>     No main suite is built. Run `/qa-api-test-setup` later when you want
+>     the full coverage suite. Tickets work fully without it.
+>
+> **(b) Full setup first (recommended for long-term project use)**
+>     Stop here. Run `/qa-api-test-setup` yourself.
+>     Builds the entire main suite (~30 min – 2 hours depending on spec size).
+>     After it finishes, re-run `/qa-test-ticket <KEY>`.
+>
+> **(c) Cancel**
+>     Exit. Nothing created.
+>
+> Pick (a/b/c):
+
+- `(a)` → run inline foundation flow (Phase 0a-inline below), then continue with Phase 0b.
+- `(b)` → stop with no changes. Tell user: "Run `/qa-api-test-setup` then re-run `/qa-test-ticket <KEY>`."
+- `(c)` → stop.
+
+**Case 2 — `.env` exists but shared infra incomplete** (e.g. `newman-env.json` missing, `run-tests.sh` missing): offer the 2-way prompt:
+
+> Shared infrastructure is incomplete:
+>   ✗ newman-env.json missing
+>   ✗ run-tests.sh missing
+>
+> **(a) Regenerate the missing shared files (~1 min)** from templates using existing `.env`. Then continue with the ticket build.
+> **(b) Stop, restore them manually, re-run.**
+>
+> Pick (a/b):
+
+- `(a)` → regenerate missing files from `.claude/templates/`, then continue with 0a-keys.
+- `(b)` → stop.
+
+**Case 3 — `.env` exists with all required keys + shared infra complete**: continue silently to 0a-keys.
+
+### 0a-keys — Required key validation
+
+Load `.env`. Required keys: `BASE_URL`, `OPENAPI_SPEC`, `LOGIN_EMAIL`, `LOGIN_PASSWORD`, `AUTH_TYPE`, `TOKEN_JSON_PATH`, `LOGIN_PATH`. If any required key is missing → offer the interactive-fill prompt:
+
+> `.env` exists but missing required keys:
+>   ✗ <KEY>
+>   ✗ <KEY>
+>
+> **(a) Let me ask for them now** and append to `.env`.
+> **(b) Stop**, you'll edit `.env` manually.
+>
+> Pick (a/b):
+
+- `(a)` → ask user one key at a time, append to `.env`.
+- `(b)` → stop with `Missing keys: <list>. Edit .env then re-run /qa-test-ticket <KEY>.`
+
+### 0a-inline — Inline foundation flow (only if Case 1 picked (a) above)
+
+Gather minimum config in this order:
+
+1. **Project name** (for collection name + filenames)
+2. **API base URL**
+3. **OpenAPI spec source** — URL or local path. Load with the same Scalar/HTML auto-discovery logic as `/qa-api-test-setup` Phase 2a. Print the mandatory endpoint count block (same format as setup Phase 2b).
+4. **Auto-detect** `AUTH_TYPE`, `LOGIN_PATH`, `TOKEN_JSON_PATH` from spec (same logic as setup Phase 1d). Confirm with user.
+5. **Login email + password** (only if AUTH_TYPE includes `jwt`).
+6. **Platform API key** (only if AUTH_TYPE includes `apikey`).
+7. **`INCLUDE_RATE_LIMIT_TESTS`** — ask once with destructive-action warning, default `false`.
+8. **Postman workspace** — list via `getWorkspaces`, user picks.
+
+Write artifacts:
+- `.env` with persistent keys
+- Create shared Postman environment `<ProjectName> Environment` via `createEnvironment` with universal vars (see setup Phase 6b for the value list)
+- Write `newman-env.json` (mirror of the cloud env)
+- Render `run-tests.sh` and `generate-issues.py` from `.claude/templates/`
+
+Do NOT create:
+- The main Postman collection
+- `<project-slug>-collection.json`
+- `project-snapshot-*.json`
+
+Print confirmation:
+```
+Foundation complete in <Nm>:<Ns>.
+  ✓ .env written
+  ✓ Shared environment "<ProjectName> Environment" created
+  ✓ newman-env.json written
+  ✓ run-tests.sh, generate-issues.py rendered from templates
+
+No main suite yet. To build it later, run /qa-api-test-setup
+(it will reuse the shared infrastructure created above).
+
+Now building ticket collection for <KEY>...
+```
+
+Continue to Phase 0b.
 
 ### 0b — Postman plugin connected
 
@@ -63,19 +187,37 @@ Call `mcp__plugin_atlassian_atlassian__atlassianUserInfo`.
 
   If (b) → ask user to paste full ticket: summary, description, acceptance criteria, any linked specs. Use that content for Phase 1 instead of the plugin.
 
-### 0d — Spec sync gate (run /qa-api-sync first)
+### 0d — Spec sync gate (detect project state, run scoped or full sync)
 
-Before building anything for this ticket, ensure the project's main collection reflects the current API spec. Stale spec = stale tests.
+Before building anything for this ticket, ensure existing collections reflect the current API spec. Stale spec = stale tests.
 
-1. Check for an existing snapshot file: `ls api-snapshot-*.json 2>/dev/null`.
-   - **No snapshot** → tell user: `No api-snapshot-*.json found. Run /qa-api-test-setup first to baseline the spec.` Stop.
-2. Run the full `/qa-api-sync` flow internally (Phases 0–7 from `qa-api-sync.md`).
-3. If drift was detected and applied → tell the user:
-   > Spec drift was detected and applied before building this ticket's collection. The main collection (and any affected ticket collections) are now up to date.
-4. If user declined the sync in `/qa-api-sync` Phase 3 → ask:
-   > You skipped the sync. The ticket collection may be built against stale request shapes. Continue anyway? (y/n)
+Check project state:
 
-   If `n` → stop. If `y` → proceed but warn that test failures may reflect spec drift, not real bugs.
+```bash
+ls project-snapshot-*.json 2>/dev/null
+ls "Jira Tickets"/*/snapshot-*.json 2>/dev/null
+```
+
+**Case 1 — `project-snapshot-*.json` exists (fully set-up project)**:
+
+Run the full `/qa-api-sync` flow internally (Phases 0–7 from `qa-api-sync.md`). Standard project-level diff + cross-reference of ticket collections. If drift detected and applied → tell user `Spec drift was detected and applied. The main collection and any affected ticket collections are now up to date.`
+
+If user declined the sync in `/qa-api-sync` Phase 3 → ask:
+> You skipped the sync. The ticket collection may be built against stale request shapes. Continue anyway? (y/n)
+
+If `n` → stop. If `y` → proceed but warn that test failures may reflect spec drift, not real bugs.
+
+**Case 2 — No project snapshot, but `Jira Tickets/<KEY>/snapshot-*.json` files exist (foundation-only with prior tickets)**:
+
+Run `/qa-api-sync` in **scoped mode**: it iterates per-ticket snapshots, diffs each against the fresh spec, refreshes affected ticket collections, and updates each refreshed ticket's snapshot. Main collection updates are skipped (none exists).
+
+Tell user: `Foundation-only mode — running scoped sync (per-ticket snapshots). Main suite update skipped (none exists).`
+
+**Case 3 — No project snapshot, no ticket snapshots (foundation-only, first ticket ever)**:
+
+Nothing to sync against. Tell user: `Foundation-only mode — no prior snapshots to diff against. Skipping sync. Ticket will be built against the current spec directly.`
+
+Continue to 0e.
 
 ### 0e — Workspace target
 
@@ -114,6 +256,30 @@ AC scenarios: <N>
 Preconditions detected: <list>
 Specific data values: <list>
 ```
+
+### 1c — Mandatory ticket scope summary (cannot be skipped)
+
+After 1b identifies endpoints in scope, print a fixed scope summary block. This is **mandatory and cannot be skipped** — same status as `/qa-api-test-setup` Phase 2b's endpoint count print.
+
+```
+✓ Ticket <KEY> scope:
+  Endpoints touched: <N>
+    POST  /api/v1/orders                  (module: Orders)
+    GET   /api/v1/orders/{id}             (module: Orders)
+    PATCH /api/v1/orders/{id}/submit      (module: Orders)
+    GET   /api/v1/branches                (module: Branches)
+    POST  /api/v1/suppliers               (module: Suppliers)
+  Modules involved:  Orders, Branches, Suppliers
+
+  Spec context: <total> endpoints across <M> modules.
+  This ticket covers <N> (<pct>%).
+```
+
+**Hard stop if endpoints in scope = 0** — print: `Ticket scope analysis returned 0 endpoints. The ticket text may be missing references to API endpoints, or the OpenAPI spec at OPENAPI_SPEC may not match the ticket's domain. Aborting.` and exit. Do NOT proceed to Phase 2.
+
+The `<pct>%` is `(N / total spec endpoints) × 100` rounded to whole percent. Helpful gut-check: a typo or wrong spec source usually produces 0% or 100%, both worth flagging.
+
+The agent must show this block to the user explicitly. It is not optional, not collapsible, not skippable in any mode (full setup, foundation-only, or paste-mode).
 
 ---
 
@@ -156,7 +322,7 @@ Build the plan in **four folders**:
 ### Happy Path - All Endpoints folder
 One valid-data request per `(method, path)` this ticket touches (the endpoints listed in Phase 1's analysis). No negatives, no auth-matrix variants — just a smoke pass across the ticket's surface area with valid data.
 
-Naming: `<METHOD> <path>` exactly (e.g. `POST /api/v1/orders`, `GET /api/v1/orders/{id}`). No `HP` prefix, no `TC` prefix, no status suffix.
+Naming: `<NN>. <op.summary>` where `NN` is sequential across the ticket's Happy Path folder (zero-padded to 2 digits). `<op.summary>` resolved per the fallback chain in CLAUDE.md § Happy Path folder (summary → Title-Cased operationId → `<METHOD> <path>` last resort). Example resolved names: `01. Create Order`, `02. Get Order By ID`, `03. Submit Order`. No `TC` prefix, no status suffix on Happy Path entries.
 
 The login request belongs in `Setup` (not here) — Happy Path runs after Setup so `{{accessToken}}` is already populated.
 
@@ -275,11 +441,11 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: the target folder
 - `method` + `url` — host as `{{baseUrl}}`
 - `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and `auth.type = "noauth"`
-- `body`: realistic data drawn from the ticket's specific values + OpenAPI schema. Use `{{$timestamp}}` for unique fields.
+- `body`: sourced per the matrix doc § Body data sources. **Positive tests (and the Happy Path entries) use Mode A** — pre-request random gen + post-response round-trip assertion. Ticket-specific values from the AC win over random (source #2 in the Mode A chain). **Negative tests use Mode B** — valid baseline + matrix-row mutation. **Happy Path entries** use Mode A's pre-request gen but status + schema only on assertion (no per-field round-trip — round-trip lives in Positive).
 - `events` test script — rules below
 
 **Happy Path - All Endpoints requests**: status-only assertion, valid body, no negatives. Iterate the audited flow list from Phase 3 **in order** so the resulting folder is top-to-bottom runnable.
-- `name`: `<METHOD> <path>` exactly (no prefix, no status suffix)
+- `name`: `<NN>. <op.summary>` (no `TC` prefix, no status suffix on Happy Path entries). Index `NN` sequential across this ticket's Happy Path folder, zero-padded to 2 digits.
 - Test script:
   ```js
   pm.test('Status is 2xx', () => {
@@ -296,7 +462,7 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - Login (in Setup):
   ```js
   pm.test('Status 200', () => pm.response.to.have.status(200));
-  const tokens = pm.response.json().payload.data.tokens;
+  let tokens = pm.response.json().payload.data.tokens;
   pm.environment.set('accessToken', tokens.accessToken);
   pm.environment.set('refreshToken', tokens.refreshToken);
   ```
@@ -311,7 +477,7 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 - Create entity (Setup):
   ```js
   pm.test('Create <Entity> 201', () => pm.response.to.have.status(201));
-  const d = pm.response.json().payload?.data;
+  let d = pm.response.json().payload?.data;
   if (d?.id) pm.environment.set('test<Entity>Id', d.id);
   ```
 - Negative auth-matrix tests — use prebuilt token values:
@@ -330,14 +496,49 @@ For each request, `mcp__plugin_postman_postman__createCollectionRequest`:
 
 ### 5a — Export collection
 
+First, ensure `Jira Tickets/<KEY>/` exists:
+```bash
+mkdir -p "Jira Tickets/<KEY>"
+```
+
+Then export:
 ```bash
 POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
-  -o "<project-dir>/<key-lowercase>-collection.json"
+  -o "Jira Tickets/<KEY>/collection.json"
 ```
 
-E.g. `proj123-collection.json`.
+E.g. `"Jira Tickets/PROJ-123/collection.json"`. **Ticket artifacts always live under `Jira Tickets/<KEY>/`** — never at the project root. The `<KEY>` subfolder uses the original uppercase key (e.g. `PROJ-123`), preserving case for visual scan.
+
+### 5a-snapshot — Write per-ticket snapshot
+
+After exporting the collection, write a ticket-scoped snapshot capturing the spec state for only the endpoints this ticket touches:
+
+```bash
+# Pseudocode — agent generates this in code/MCP-call form:
+# Path: Jira Tickets/<KEY>/snapshot-<YYYY-MM-DD>.json
+# Content: same shape as project-snapshot but scoped to ticket endpoints only
+```
+
+Format:
+```json
+{
+  "meta": {
+    "ticketKey": "<KEY>",
+    "specSource": "<URL or file path from .env>",
+    "totalEndpoints": <N>,
+    "builtAt": "<ISO timestamp>"
+  },
+  "endpoints": {
+    "POST /api/v1/orders":            "sha256:...",
+    "GET /api/v1/orders/{id}":        "sha256:...",
+    "PATCH /api/v1/orders/{id}/submit": "sha256:..."
+  }
+}
+```
+
+Used by `/qa-api-sync` foundation-only scoped mode to detect drift affecting this specific ticket.
 
 ### 5b — Run with Newman
 
@@ -348,7 +549,7 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 REPORT_FILE="newman-reports/<KEY>-report-$TIMESTAMP.html"
 mkdir -p newman-reports
 
-newman run "<key-lowercase>-collection.json" \
+newman run "Jira Tickets/<KEY>/collection.json" \
   --environment "newman-env.json" \
   --reporters cli,htmlextra \
   --reporter-htmlextra-export "$REPORT_FILE" \
@@ -363,12 +564,7 @@ open "$REPORT_FILE" 2>/dev/null || echo "Open: $REPORT_FILE"
 
 ## Phase 6 — Auto-debug + auto-fix
 
-After Newman finishes (the FULL initial run completes — never use `--bail` on the initial run, the HTML report must capture every failure in one pass), do NOT immediately show the summary if there are failures. Iterate up to 3 times to auto-fix what is fixable. The goal is to leave only genuine bugs and environment issues for the human.
-
-**Two hard rules for this phase:**
-
-1. **No bail on the initial Newman run.** The first run must complete fully so the HTML report contains every failure. Auto-fix iterations happen AFTER the report is generated.
-2. **Postman cloud and local JSON stay in sync.** Every time auto-fix patches a request via `mcp__plugin_postman_postman__updateCollectionRequest` (cloud update), the local `<KEY>-collection.json` MUST be re-exported immediately so Newman re-runs read the same state. See Phase 6d for the export command.
+After Newman finishes, do NOT immediately show the summary if there are failures. Iterate up to 3 times to auto-fix what is fixable. The goal is to leave only genuine bugs and environment issues for the human.
 
 ### 6a — Classify each failure
 
@@ -380,7 +576,7 @@ For each failed test, classify into one of these categories using the failure si
 | Cascading 401s starting mid-suite | Stale `accessToken` | Yes |
 | 404 on Get/Update/Delete with `{{testEntityId}}` | Stale chained ID | Yes |
 | Setup Create-then-Fetch race condition | Setup timing | Yes |
-| 409 conflict on a field that should be unique per run | Missing `{{$timestamp}}` | Yes |
+| 409 conflict on a field that should be unique per run | Hardcoded unique value (Mode A random missing) | Yes |
 | `SyntaxError: Identifier already declared` | `const` in test script top-scope | Yes |
 | 5xx transient (intermittent, no clear error) | Transient infra | Yes (retry once) |
 | `JSONError` + response is HTML | Load balancer error page | Yes (retry once after 30s) |
@@ -399,7 +595,7 @@ For each fixable failure, apply the corresponding fix:
 | Stale `accessToken` | Re-run the Login request -> re-run all downstream failed tests |
 | Stale chained ID | Re-run the Setup folder -> re-run dependent Positive/Negative tests |
 | Setup timing | Add `pm.environment.set('delay', 1500)` or `setTimeout` before the Fetch, OR add Newman `--delay-request 1500` for next iteration |
-| Missing `{{$timestamp}}` | Update the offending request body via `mcp__plugin_postman_postman__updateCollectionRequest`: insert `{{$timestamp}}` into the conflicting field (e.g. `"email": "test{{$timestamp}}@example.com"`) -> re-run |
+| Hardcoded unique value | Update the offending request body via `mcp__plugin_postman_postman__updateCollectionRequest`: replace the hardcoded value with the appropriate Mode A random (`{{$randomEmail}}`, `{{$randomUUID}}`, `{{$randomFullName}}`, `{{$randomInt}}`) per the matrix doc § Body data sources → re-run |
 | `const` at top scope | Patch the test script via `updateCollectionRequest`: replace top-scope `const ` with `let ` -> re-run |
 | Transient 5xx | Re-run the single failing request once with a 2-second delay |
 | HTML error page (JSONError) | Wait 30 seconds, re-run the failing request once |
@@ -411,7 +607,7 @@ iteration = 0
 while iteration < 3 AND any-fixable-failures-remain:
   classify all current failures
   apply auto-fixes for fixable ones via Postman MCP (cloud update)
-  re-export local <KEY>-collection.json (cloud -> file)
+  re-export local Jira Tickets/<KEY>/collection.json (cloud -> file)
   re-run only the affected tests via Newman (no --bail)
   iteration++
 ```
@@ -429,10 +625,8 @@ After ANY `updateCollectionRequest` call in this phase, re-export the collection
 POSTMAN_API_KEY="<from .claude/settings.local.json or ~/.claude/settings.json>"
 curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   "https://api.getpostman.com/collections/<OWNER_ID>-<COLLECTION_ID>" \
-  -o "<KEY-lowercase>-collection.json"
+  -o "Jira Tickets/<KEY>/collection.json"
 ```
-
-Without this re-export, Newman will keep running the OLD local JSON and your patches will have no effect on the next iteration. This is non-negotiable.
 
 ### 6e — Print what was auto-fixed (transparency, no silent changes)
 
@@ -446,7 +640,7 @@ Auto-fix log (iteration 1):
     -> Re-ran Login, re-ran 4 affected tests -> now passing
 
 Auto-fix log (iteration 2):
-  ~ 409 conflict on TC02 - field "supplierCode" not using {{$timestamp}}
+  ~ 409 conflict on TC02 - field "supplierCode" was hardcoded; patched to {{$randomUUID}}
     -> Patched request body, re-ran TC02 -> now passing
 
 Auto-fix log (iteration 3): (no fixable failures, stopping)
@@ -459,16 +653,12 @@ Final state after auto-fix:
   Flaky candidates:               <list>
 ```
 
-### 6f — Hard rules for auto-fix
+### 6f — Procedural rules for auto-fix (in addition to Hard invariants)
 
-1. **Cap at 3 iterations.** Do not loop forever. If failures persist past 3 rounds, hand off to the human.
-2. **Patch test setup ONLY, never assertions.** If an assertion expected 200 and the test got 201, the auto-fix is to verify the spec changed and update via `/qa-api-sync` -> not to silently change the assertion. Changing assertions hides real bugs.
-3. **Never modify the system under test.** We only modify the way we call the API. The API itself is untouched.
-4. **Always print what changed.** Silent fixes are forbidden. The user must be able to see "this field was patched", "this script was changed".
-5. **Re-run only affected tests, not the whole suite.** Use Newman `--folder` or per-request invocation. Saves time and avoids state pollution.
-6. **Do not retry consistent 4xx/5xx with informative errors.** Those are real bugs. Mark as candidates and stop trying to "fix" them.
-7. **Never `--bail` any Newman invocation in this phase.** Both the initial full run AND per-iteration re-runs go to completion. A bailed run leaves an incomplete HTML report which confuses humans during Phase 8.
-8. **Always re-export local JSON after every cloud patch.** Phase 6d step is mandatory after every `updateCollectionRequest` call. Postman cloud and local file must match before re-running Newman.
+1. **Never modify the system under test.** We only modify the way we call the API. The API itself is untouched.
+2. **Always print what changed.** Silent fixes are forbidden. The user must be able to see "this field was patched", "this script was changed".
+3. **Re-run only affected tests, not the whole suite.** Use Newman `--folder` or per-request invocation. Saves time and avoids state pollution.
+4. **Do not retry consistent 4xx/5xx with informative errors.** Those are real bugs. Mark as candidates and stop trying to "fix" them.
 
 ---
 
@@ -509,7 +699,7 @@ If any tests are still failing after Phase 6 (auto-fix) gave up, do NOT auto-rai
 
 ## Phase 8 — Manual debugging tips (when auto-fix did not resolve)
 
-For the full debugging playbook (triage tree, HTML report walkthrough, curl reproduction, HTTP failure patterns, Newman flags, decision tree, what-not-to-do), see `qa-api-test-setup.md` Phase 11. The same playbook applies to ticket runs - do not duplicate it here.
+For the full debugging playbook (triage tree, HTML report walkthrough, curl reproduction, HTTP failure patterns, Newman flags, decision tree, what-not-to-do), see `.claude/commands/qa-debugging-playbook.md`. Shared across all four agents — single source of truth.
 
 Ticket-specific things to check FIRST before falling back to the generic playbook:
 
@@ -521,11 +711,11 @@ Ticket-specific things to check FIRST before falling back to the generic playboo
 
 4. **`pm.environment.set` vs `pm.collectionVariables.set` mixing** - ticket-scoped collections use `pm.environment.set` for chaining. If a test script accidentally uses `pm.collectionVariables.set`, the value goes to the wrong scope and downstream lookups return undefined.
 
-5. **`{{$timestamp}}` placement** - tickets that re-run often (e.g. on every PR) need timestamp-uniqueness on unique fields (email, code, name). Missing it = 409 on re-run.
+5. **Random gen on unique fields** - tickets that re-run often (e.g. on every PR) need Mode A random values on unique fields (email, code, name) — `{{$randomEmail}}`, `{{$randomUUID}}`, `{{$randomFullName}}` etc. A hardcoded value here = 409 on re-run.
 
 6. **Spec drift since collection was built** - if the ticket collection is older than your last `/qa-api-sync` run, the endpoints in it may have changed shape. Run `/qa-api-sync` first - it auto-refreshes affected ticket collections.
 
-If none of the above applies, fall through to the generic playbook in `qa-api-test-setup.md` Phase 11.
+If none of the above applies, fall through to `.claude/commands/qa-debugging-playbook.md`.
 
 ---
 
@@ -569,7 +759,7 @@ Wait for user reply.
 
 Re-run the failing tests (no `--bail` — let the run complete fully so the report is whole):
 ```bash
-newman run <KEY>-collection.json -e newman-env.json \
+newman run "Jira Tickets/<KEY>/collection.json" -e newman-env.json \
   --folder "<failing folder>" --verbose
 ```
 
@@ -712,15 +902,6 @@ JIRA_PROJECT_KEY (saved to .env): <KEY>
 
 ---
 
-## Rules
+## Procedural notes
 
-- **No partial builds.** If credentials/data are missing, stop and ask — never proceed with placeholders.
-- **Standalone collection** — not a fork; carry own auth + variables.
-- **Continuous TC numbering** across Positive → Negative.
-- **Full auth matrix** on every primary endpoint in Negative (no/expired/tampered/malformed).
-- **Setup scales to need** — don't add irrelevant prep, don't skip required state.
-- **Never `const` at top scope** in test scripts.
-- **One-off IDs do NOT go in `.env`** — only persistent creds/keys.
-- **`POSTMAN_API_KEY` stays in `.claude/settings.local.json` (project-local, gitignored) or `~/.claude/settings.json` (global)**, never in project `.env`. Local wins if both set.
-- **Never `--bail` the Newman run.** The initial run must complete to fill the HTML report with every failure. Auto-fix iterations also run to completion. `--bail` is allowed only in Phase 8's manual debugging tips for human-driven single-bug triage, never as default.
-- **Cloud + file must stay in sync.** Any change the agent makes to a request via Postman MCP must be paired with a re-export of the local collection JSON (Phase 6d's curl command). Newman reads the file, so an out-of-sync file = patches ignored on the next run.
+- **One-off IDs do NOT go in `.env`** — only persistent credentials and API keys. Ticket-specific entity IDs are populated at runtime via Setup scripts, not stored in `.env`.

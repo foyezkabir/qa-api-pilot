@@ -1,48 +1,77 @@
 ---
 name: qa-api-test-setup
-description: "First-time API test suite setup — verifies plugins (Postman/Atlassian/Newman), discovers or creates .env, lists Postman workspaces, builds the main collection from an OpenAPI spec with auto-generated happy + negative tests per endpoint, writes a Newman run script, and creates the initial api-snapshot file used by /qa-api-sync to track future spec drift."
+description: "First-time API test suite setup — verifies plugins (Postman/Atlassian/Newman), discovers or creates .env, lists Postman workspaces, builds the main collection from an OpenAPI spec with auto-generated happy + negative tests per endpoint, writes a Newman run script, and creates the initial project-snapshot file used by /qa-api-sync to track future spec drift."
 ---
 
 # API Test Suite Setup
 
-You are setting up a fully automated API testing suite using Postman + Newman for a new project. Follow every step in order. Do not skip steps.
+You are setting up a fully automated API testing suite using Postman + Newman for a new project.
 
-This command is for **first-time project setup only**. For per-ticket test collections on an already-set-up project, use `/qa-test-ticket <KEY>` instead.
+This command is for **first-time project setup only**.
+
+---
+
+## Hard invariants (must hold throughout this run)
+
+These rules override all phase-specific guidance below. Re-read them before any batch operation, every module loop, and at the end of each phase. If a phase instruction ever seems to contradict one, the invariant wins.
+
+ 1. **NEVER** write `POSTMAN_API_KEY` to project `.env`. It lives in `.claude/settings.local.json` (project-local, gitignored) or `~/.claude/settings.json` (global). Local wins if both set.
+ 2. **NEVER** `--bail` Newman in any phase (smoke run, auto-fix iterations, verification). Bailing leaves an incomplete HTML report — worse than no report.
+ 3. **NEVER** use `const` at top scope in Postman test scripts. Newman re-executes the script; `const` re-declaration throws `SyntaxError`. Use `let` everywhere at top scope.
+ 4. **NEVER** silently skip a matrix row. Each row is either generated, marked `n/a (condition not met)`, or marked `skipped (env flag)`. Mental skipping is forbidden.
+ 5. **NEVER** use spec-tag order for module folders or Happy Path. Always use the audited flow order from Phase 2d (`NN.` index = dependency-flow position).
+ 6. **ALWAYS hard-stop** if the loaded spec has 0 endpoints, or if `getAuthenticatedUser` fails on Postman.
+ 7. **ALWAYS re-export** the local `<project-slug>-collection.json` immediately after every Postman MCP write (`createCollection*`, `updateCollection*`, `patchCollection`). Newman reads the local file — out-of-sync = patches don't apply.
+ 8. **ALWAYS dual-write** environment changes: cloud Postman Environment (`createEnvironment` / `patchEnvironment`) AND local `newman-env.json`. Both must reflect the same vars.
+ 9. **ALWAYS use Mode A** for positive bodies (pre-request random gen + post-response round-trip) and **Mode B** for negative bodies (deterministic baseline + matrix-row mutation). Never mix; never use Mode A for negatives.
+10. **`INCLUDE_RATE_LIMIT_TESTS` defaults to `false`.** Ask once during Phase 1 with a destructive-action warning; persist the user's answer to `.env`. Honor the flag everywhere — never default-on rate-limit tests.
+
+If you catch yourself about to violate any of these, stop and explain to the user. Do not silently proceed.
 
 ---
 
 ## Preflight — Already-set-up guard
 
-Run this BEFORE Phase 0. It prevents accidental re-setup that would create duplicate Postman collections and overwrite local files.
+Run this BEFORE Phase 0 to prevent accidental re-setup.
 
-### Detect setup artifacts in the current working directory
+### Detect artifacts in the current working directory
 
-Check for the presence of each of the following:
+Artifacts split into two distinct buckets:
+
+**Setup-owned artifacts** (proof the main suite was built):
+
+| Signal | Detection |
+|---|---|
+| Main collection JSON | `test -f <project-slug>-collection.json` (project-slug from `.env` if present, else heuristic) |
+| Project snapshot | `ls project-snapshot-*.json 2>/dev/null` matches at least one file |
+| Main collection in Postman cloud | `mcp__plugin_postman_postman__getCollections` lists a collection named `<ProjectName> API — Automated Tests` |
+
+**Shared infrastructure** (used by both setup and ticket workflows):
 
 | Signal | Detection |
 |---|---|
 | `.env` file with required keys | `test -f .env` and the keys `BASE_URL`, `OPENAPI_SPEC`, `AUTH_TYPE` all present |
-| Main collection JSON | `ls *-collection.json 2>/dev/null` matches at least one file (excluding ticket-style names like `proj123-collection.json`) |
-| Snapshot file | `ls api-snapshot-*.json 2>/dev/null` matches at least one file |
 | Newman env | `test -f newman-env.json` |
 | Run script | `test -f run-tests.sh` |
+| Issues parser | `test -f generate-issues.py` |
+| Shared Postman environment | `mcp__plugin_postman_postman__getEnvironments` lists one named `<ProjectName> Environment` |
 
-Count how many signals are present.
+**Ignore** ticket artifacts entirely — they live under `Jira Tickets/<KEY>/` and have no bearing on setup state.
 
 ### Decision
 
-**If 3 or more signals are present** → treat the project as already set up. Stop and tell the user:
+**If ANY setup-owned signal is present** → treat the project as already set up. Stop and tell the user:
 
-> This project appears to be already set up:
->   - `<list each detected artifact>`
+> This project's main suite is already built:
+>   - `<list each detected setup-owned artifact>`
 >
-> `/qa-api-test-setup` is for first-time setup only. To work with an existing project:
+> `/qa-api-test-setup` is for first-time main-suite setup only. To work with an existing project:
 >
 >   - New endpoints added by devs?     -> `/qa-api-sync`
 >   - New Jira ticket to test?         -> `/qa-test-ticket <KEY>`
 >   - Just want to run the full suite? -> `./run-tests.sh`
 >
-> If you really want to re-setup from scratch (this will create a duplicate collection in Postman and overwrite local files), confirm by typing exactly:
+> If you really want to re-setup from scratch (will create a duplicate collection in Postman and overwrite local files), confirm by typing exactly:
 >
 >   `force re-setup`
 >
@@ -50,12 +79,20 @@ Count how many signals are present.
 
 Wait for the user's reply.
 
-- If they type exactly `force re-setup` → proceed to Phase 0, but first warn: `Force re-setup confirmed. Existing local files will be overwritten and a duplicate Postman collection will be created. Continuing.`
-- If they type anything else (including "yes", "y", "ok", "go ahead") → STOP. Do not proceed. The escape hatch requires the exact phrase to avoid foot-gun mistypes.
+- If they type exactly `force re-setup` → proceed to Phase 0. Warn: `Force re-setup confirmed. Existing setup-owned files will be overwritten and a duplicate Postman collection will be created. Existing ticket collections in `Jira Tickets/` will NOT be touched.`
+- If they type anything else (including "yes", "y", "ok", "go ahead") → STOP. The escape hatch requires the exact phrase to avoid foot-gun mistypes.
 
-**If fewer than 3 signals are present** → the project is not set up (or only partially set up). Proceed to Phase 0 normally. If 1-2 signals are present, mention them in passing so the user knows what was detected:
+**Else if shared-infra signals are present (foundation-only state)** → proceed to Phase 0, but with a "reuse mode" flag set:
 
-> Detected some existing artifacts (`<list>`) but project is not fully set up. Continuing with setup. Existing files in `.env` will be preserved where possible.
+> Foundation-only project detected:
+>   - Shared infrastructure exists: `<list>`
+>   - <N> ticket collections in `Jira Tickets/` (will NOT be touched)
+>
+> Reusing existing shared infrastructure. Building the main suite now.
+
+In reuse mode: Phase 1 reuses `.env`, Phase 6 reuses the shared Postman env + `newman-env.json`, Phase 7 reuses `run-tests.sh` + `generate-issues.py`. Only the main collection and project snapshot get created.
+
+**Else (no signals at all)** → fully fresh project, proceed to Phase 0 normally.
 
 ---
 
@@ -207,7 +244,7 @@ After all answers collected (and after Phase 1d completes), **write `.env` to th
 
 ### 1d — Auto-detect auth shape from the OpenAPI spec
 
-After the spec is loaded (Phase 2 logic can be pulled forward to here, or this can run as the first step of Phase 2 and feed back into Phase 1c's `.env` write), derive three values automatically. Show the detected values and ask the user to confirm before continuing.
+After the spec is loaded (Phase 2), derive three values automatically. Show the detected values and ask the user to confirm before continuing.
 
 **Step 1 - Detect `AUTH_TYPE`:**
 
@@ -326,11 +363,9 @@ Now extract for planning:
 - **Auth requirements** per endpoint (bearerAuth vs apiKey vs none)
 - Enum values for any constrained fields
 
-Scan the spec completely before planning.
-
 ### 2d — Dependency audit and flow ordering
 
-The order endpoints appear in the spec is rarely a valid execution order. `GET /profile` listed before `POST /auth/login` will fail at runtime because the token doesn't exist yet. Before building anything, the agent runs **one dependency audit pass** over the whole spec and produces:
+Spec order rarely matches execution order. Before building anything, run **one dependency audit pass** over the whole spec and produce:
 
 1. A **flow-ordered list of every endpoint** — used to build the `Happy Path - All Endpoints` folder.
 2. A **flow-ordered list of modules** — derived from (1) by collapsing endpoints to their containing tag. Used to assign the `NN.` prefix on module folders. So if the first endpoint in flow order is `POST /auth/register`, the `Auth` module becomes `00. Auth`. If the next new module touched is `Users`, it becomes `01. Users`, etc.
@@ -420,9 +455,7 @@ Only if Atlassian connected AND user provided a space key in 1b/1c:
 3. `mcp__plugin_atlassian_atlassian__getConfluencePage` — read pages mentioning "API", "onboarding", "test cases", "endpoints", or module names
 4. Extract business rules, expected error codes, field constraints not in the spec
 
-If user chose manual paste mode in 0b and gave Confluence content: use the pasted text instead.
-
-Combine with the spec for richer assertions.
+If user chose manual paste mode in 0b and gave Confluence content: use the pasted text instead. Combine with the spec for richer assertions.
 
 ---
 
@@ -435,10 +468,11 @@ Decide the structure using the **nested module / test-type pattern**:
 ```
 <ProjectName> API — Automated Tests
 ├── Happy Path - All Endpoints
-│   ├── POST /auth/login
-│   ├── GET  /orders
-│   ├── POST /orders
-│   └── ... one valid-data request per endpoint in the spec
+│   ├── 01. Register User
+│   ├── 02. Login
+│   ├── 03. List Orders
+│   ├── 04. Create Order
+│   └── ... one valid-data request per endpoint, named `<NN>. <op.summary>` in audited flow order
 ├── 00. <Module1>
 │   ├── Positive
 │   │   ├── TC01: <happy path> (200)
@@ -456,14 +490,13 @@ Decide the structure using the **nested module / test-type pattern**:
 
 ### Rules
 
-- **Happy Path - All Endpoints** is a top-level folder, always created first, alongside (not replacing) the module folders. It contains exactly one valid-data request per `(method, path)` in the spec — no negatives. Purpose: a fast smoke pass across the entire API in one folder. See Phase 5b/5c for build details.
+- **Happy Path - All Endpoints** is a top-level folder, always created first, alongside (not replacing) the module folders. It contains exactly one valid-data request per `(method, path)` in the spec — no negatives. See Phase 5b/5c for build details.
 - **Top-level module folders** = one per API **tag** (from the OpenAPI spec's `tags` field), named `<NN>. <TagName>` where `NN` is zero-padded **audited flow order** from Phase 2d (NOT spec-tag order). So auth/signup modules float to `00.`/`01.`, downstream modules get later numbers. If the spec has no tags, ask the user how to group (by path prefix, by HTTP method, or one big folder).
-- **Sub-folders** = always two under each module: `Positive` and `Negative`. Always create both, even if one starts with a single test.
-- **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<METHOD> <path>`.
-- **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND has the **full applicable negative matrix** in its module's `Negative` sub-folders. The matrix is defined in `.claude/commands/qa-negative-matrix.md` — agents do not "decide mentally" what negatives are worth writing; they walk every matrix row, check the condition, and either write the test or mark the row as `n/a (condition not met)`. See the matrix doc for the 24 rows and their conditions. Rough averages: 4–13 negatives per endpoint depending on shape (public GETs are light, body-carrying POSTs are heavy).
+- **TC numbering** = **resets per module**. TC01 starts fresh inside `00. <Module1>`, then again at TC01 inside `01. <Module2>`. Within a module, numbering is continuous across Positive then Negative (Positive ends at TC04, Negative starts at TC05). Happy Path requests are **not** TC-numbered — they are named `<NN>. <op.summary>` where `NN` is sequential across the entire Happy Path folder (not per-module). See CLAUDE.md § Happy Path folder for the full naming rule (fallback chain, padding width, duplicate-summary handling, matrix-row interaction).
+- **Minimum coverage per endpoint** = appears in **Happy Path - All Endpoints** AND has at least one happy path in its module's `Positive` AND has the **full applicable negative matrix** in its module's `Negative` sub-folders. The matrix is defined in `.claude/commands/qa-negative-matrix.md` — agents walk every matrix row, check the condition, and either write the test or mark the row as `n/a (condition not met)`. See the matrix doc for the 24 rows and their conditions.
 - **Negative sub-folders**: every module's `Negative` folder has 4 sub-folders, always created upfront even if empty: `Auth Failures`, `Validation Failures`, `Resource Errors`, `Security Probes`. The name describes the *category of failure*, applied to the parent module's endpoints (e.g. `Orders > Negative > Auth Failures` = auth-failure tests for Orders endpoints, not tests of the Auth module). TC numbering is continuous across all four (single counter per module).
 - **Collection variables set by certain requests** = note explicitly which Positive tests set `accessToken` (login), `test<Entity>Id` (creates), etc.
-- **Matrix-required variables** (see matrix doc Phase 4 implementation notes): `expiredAccessToken`, `tamperedAccessToken`, `altUserAccessToken`, `nonExistentId` (`00000000-0000-0000-0000-000000000000`), `RESPONSE_TIME_SLA_MS` (default 500), `INCLUDE_RATE_LIMIT_TESTS`. These all go into `newman-env.json` (Phase 6b) with defaults; the agent asks the user for `altUserAccessToken` only if a row needing it (`auth-wrong-role`) applies to any endpoint.
+- **Matrix-required variables** (see matrix doc § Implementation notes for the agents): `expiredAccessToken`, `tamperedAccessToken`, `altUserAccessToken`, `nonExistentId` (`00000000-0000-0000-0000-000000000000`), `RESPONSE_TIME_SLA_MS` (default 500), `INCLUDE_RATE_LIMIT_TESTS`. These all go into `newman-env.json` (Phase 6b) with defaults; the agent asks the user for `altUserAccessToken` only if a row needing it (`auth-wrong-role`) applies to any endpoint.
 
 ### Print the plan
 
@@ -482,14 +515,14 @@ Module ordering (audited flow order — reordered from spec, with reasoning):
   ...
 
 Happy Path - All Endpoints (<N>, audited flow order, with reasoning):
-   1. POST /auth/register                  — entry; produces {{userId}}
-   2. POST /auth/login                     — needs registered user (#1); produces {{accessToken}}, {{refreshToken}}
-   3. GET  /profile                        — needs {{accessToken}} (#2)
-   4. PUT  /profile                        — needs {{accessToken}} (#2)
-   5. POST /orders                         — needs {{accessToken}} (#2); produces {{testOrderId}}
-   6. GET  /orders/{id}                    — needs {{testOrderId}} (#5)
-   7. PATCH /orders/{id}                   — needs {{testOrderId}} (#5)
-   8. POST /orders/{id}/cancel             — needs {{testOrderId}} (#5)
+   01. Register User                       — entry; produces {{userId}}
+   02. Login                               — needs registered user (#01); produces {{accessToken}}, {{refreshToken}}
+   03. Get Profile                         — needs {{accessToken}} (#02)
+   04. Update Profile                      — needs {{accessToken}} (#02)
+   05. Create Order                        — needs {{accessToken}} (#02); produces {{testOrderId}}
+   06. Get Order By ID                     — needs {{testOrderId}} (#05)
+   07. Update Order                        — needs {{testOrderId}} (#05)
+   08. Cancel Order                        — needs {{testOrderId}} (#05)
    ...
  158. DELETE /admin/audit-log/{id}         ⚠ orphan: no producer for {auditLogId}, placed at end
 
@@ -517,7 +550,7 @@ Total folders: 1 (Happy Path) + <M> modules × 2 sub-folders each = <T>
 Total requests: <N> (Happy Path) + <N> (module Positive + Negative) = <T>
 
 Variable-setting requests:
-  - Happy Path > POST /auth/login → sets accessToken, refreshToken
+  - Happy Path > 02. Login → sets accessToken, refreshToken
   - 00. <Module1> > Positive > TC01: Login → sets accessToken, refreshToken
   - 02. <Module3> > Positive > TC01: Create Product → sets testProductId
   - ...
@@ -585,17 +618,26 @@ Build in two passes.
 
 Iterate `auditedFlow` from Phase 2d **in order**. For each entry, create one request via `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: `happyPathFolderId`
-- `name`: `<METHOD> <path>` exactly (e.g. `POST /auth/login`, `GET /orders/{id}`). No `HP` prefix, no `TC` prefix, no status suffix.
+- `name`: `<NN>. <op.summary>` where `NN` is the audited-flow index (zero-padded to 2 digits, or 3 digits when total Happy Path entries > 100). `<op.summary>` resolved per the fallback chain in CLAUDE.md § Happy Path folder: (1) op's `summary` field; (2) op's `operationId` Title-Cased; (3) `<METHOD> <path>` as last resort. Disambiguate duplicate summaries by appending method or path segment. Example resolved names: `02. Login`, `05. Create Order`, `15. List Products (v1)`.
 - `method`, `url` from spec — host as `{{baseUrl}}`. Path params like `{id}` resolve to chained variables like `{{testOrderId}}` if a prior request creates that entity; otherwise leave as-is for the user to wire up.
 - `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and set `auth.type = "noauth"`
-- `body`: realistic valid data drawn from the spec schema + examples. Use `{{$timestamp}}` for unique fields.
-- `events` test script — **status-only assertion**:
+- `body`: for POST/PUT/PATCH, generated by a **pre-request script** using the **Mode A source chain** from `.claude/commands/qa-negative-matrix.md` § Body data sources. Random constraint-aware values for user-supplied fields, chained env vars for resource references, skip read-only and sensitive fields. Stashed in `{{__sentBody}}` for downstream use. **No per-field round-trip assertions here** — that's Pass 2's job; Happy Path is the lightweight smoke profile.
+- `events` test script — **status + schema only** (the Happy Path smoke profile):
   ```js
   pm.test('Status is 2xx', () => {
     pm.expect(pm.response.code).to.be.oneOf([200, 201, 202, 204]);
   });
+
+  // Schema validation (inlined from spec's 2xx response schema at build time)
+  let schema = { /* inlined OpenAPI responses.<2xx>.content.application/json.schema */ };
+  pm.test('Response matches schema', () => {
+    pm.response.to.have.jsonSchema(schema);
+  });
+
+  // Cross-cutting: sensitive-data leak + response time SLA (always)
+  // (script-injected from xcut-sensitive-leak, xcut-response-time)
   ```
-  No deep schema checks — that's what the per-module Positive folder is for. Happy Path is the smoke pass.
+  No deep per-field round-trip checks — that's what the per-module Positive folder is for. Happy Path = "is it alive AND shaped correctly", in two cheap assertions.
 - **Variable chaining still applies**: if the endpoint is the login or creates an entity, include the same `pm.collectionVariables.set(...)` block as Pass 2 below so downstream Happy Path requests can use the IDs/tokens. The audit from Phase 2d guarantees the login endpoint runs before any token-protected endpoint, so by the time Pass 1 reaches `GET /profile`, `{{accessToken}}` is already set.
 
 **Pass 2 — Module Positive / Negative requests (matrix-driven, module-wise batching):**
@@ -604,25 +646,30 @@ For each module in audited order, build Positive requests first, then walk the n
 
 **Module-wise batching:** Process **one module at a time**. After each module's tests are generated, if `totalEndpoints > 20`, print progress and ask `Module <NN>. <Name> done — N tests. Continue to <NN+1>? (y/n)`. The user can stop mid-build at any module boundary; the build resumes cleanly because each module is self-contained. For modules with > 10 endpoints, additionally chunk into sub-batches of 10 endpoints (still completing the module before prompting). For projects ≤ 20 endpoints total, no prompts — straight through.
 
-**Positive (per endpoint in module):**
+**Positive (per endpoint in module — full Mode A: random + round-trip):**
 
 Use `mcp__plugin_postman_postman__createCollectionRequest`:
 - `folderId`: `<module>PositiveFolderId`
 - `method`, `url` from spec — host as `{{baseUrl}}`
 - `header`: `Content-Type: application/json`; for API-key endpoints add `Authorization: ApiKey {{platformApiKey}}` and set `auth.type = "noauth"`
-- `body`: realistic test data from the spec; use `{{$timestamp}}` for unique fields (email, codes, names)
-- `events` test script — follow rules below + cross-cutting assertions from the matrix doc (response time, schema validation, sensitive-data leak, idempotency where applicable)
+- **Body data (for POST/PUT/PATCH)**: generated by a **pre-request script** using the Mode A source chain from `.claude/commands/qa-negative-matrix.md` § Body data sources. Stashed in `{{__sentBody}}` for the post-response round-trip.
+- `events` test scripts — full Positive profile:
+  - **Pre-request**: build random body per Mode A, stash in env for assertion phase.
+  - **Post-response**: status assertion + schema validation + **per-field round-trip assertion** for every user-supplied field + presence/format check for server-generated fields + variable chaining for downstream tests (set `testXId` from response if endpoint creates a resource).
+  - **Plus all cross-cutting** assertions from matrix doc: `xcut-sensitive-leak`, `xcut-response-time`, `xcut-schema-validation`, `xcut-idempotency` (if applicable to the verb).
+  - See the matrix doc § Body data sources for the canonical pre/post-script template.
 
 **Negative (per endpoint in module — walk every matrix row):**
 
 For each endpoint in the module, walk every row of `.claude/commands/qa-negative-matrix.md`. For each row:
 
 1. Evaluate the row's **condition** against the endpoint's spec. If the condition is false → mark `n/a` and skip (no test generated).
-2. If the condition is true → generate the test(s):
+2. If the condition is true → generate the test(s) using **Mode B (deterministic source + mutation)** from `.claude/commands/qa-negative-matrix.md` § Body data sources:
    - `folderId`: the row's **target sub-folder** (`<module>NegativeAuthFolderId` / `<module>NegativeValidationFolderId` / `<module>NegativeResourceFolderId` / `<module>NegativeSecurityFolderId`)
    - `name`: `TC<NN>: <resolved row name pattern>` — use the next TC number in this module's continuous counter (shared across all 4 Negative sub-folders)
-   - `method`, `url`, headers, body: copied from the endpoint's Positive happy-path, then the row's **mutation** is applied (e.g. for `auth-no-token` → remove `Authorization` header; for `val-missing-required` → omit one required field per test, generating N tests for N required fields)
-   - `events` test script: from the matrix row template
+   - `method`, `url`, headers: copied from the endpoint's Positive baseline
+   - `body`: **Mode B** — start with the valid baseline body (enum first value, spec example, type-default — NOT random; negatives need determinism so the test is repeatable), then apply the row's **mutation** (e.g. for `auth-no-token` → remove `Authorization` header; for `val-missing-required` → omit one required field per test, generating N tests for N required fields; for `sec-sql-injection` → inject `' OR '1'='1` into one string field per test)
+   - `events` test script: from the matrix row template — status check + error body shape + no-stack-trace + sensitive-data leak. **No round-trip assertion** (the request was supposed to fail).
 3. If the row needs a **Setup fixture** (`res-conflict`, `res-wrong-state`, `auth-wrong-role`), ensure the dependency exists in `Positive` or as an alt-user var. Add it if missing.
 4. Add the **cross-cutting assertions** (`xcut-error-body-shape`, `xcut-no-stack-trace`, `xcut-sensitive-leak`) into the test script of every negative test.
 
@@ -675,7 +722,7 @@ The file lives in the already-gitignored `collection-run-issues/` directory so i
 - Use `let` at top scope, never `const` — Newman throws `SyntaxError: Identifier already declared`
 - Login → save tokens:
   ```js
-  const d = pm.response.json().payload?.data;
+  let d = pm.response.json().payload?.data;
   if (d) {
     pm.collectionVariables.set('accessToken', d.tokens.accessToken);
     pm.collectionVariables.set('refreshToken', d.tokens.refreshToken);
@@ -684,7 +731,7 @@ The file lives in the already-gitignored `collection-run-issues/` directory so i
   Adjust the JSON path to match the actual response shape (use `TOKEN_JSON_PATH` from `.env`).
 - Create endpoints → save new ID:
   ```js
-  const d = pm.response.json().payload?.data;
+  let d = pm.response.json().payload?.data;
   if (d?.id) pm.collectionVariables.set('testEntityId', d.id);
   ```
 - List endpoints → save first item's ID:
@@ -832,15 +879,10 @@ Watch for:
 
 ### 8a — Auto-fix loop (if any tests failed)
 
-If the smoke run had any failures, apply the same auto-fix matrix used by `/qa-test-ticket` Phase 6 before reporting to the user. The agent's job is to leave only genuine bugs and env issues in the failure list, not to hand off every minor issue.
-
-**Two non-negotiable rules in this phase:**
-
-1. **Never `--bail` the Newman run.** The first run must complete fully so the HTML report shows every failure - bailing leaves an incomplete report that's worse than no report. Auto-fix iterations also run to completion.
-2. **Cloud + file must stay in sync.** Every `updateCollectionRequest` MCP call must be followed by a re-export of the local `<project-slug>-collection.json` so the next Newman iteration reads the patched state. See the curl in 8b.
+If the smoke run had any failures, apply the same auto-fix matrix used by `/qa-test-ticket` Phase 6 before reporting to the user. Hard invariants 2 (never `--bail`) and 7 (re-export local JSON after every MCP write) apply to every iteration.
 
 For each failed request:
-1. Classify (spec drift / stale accessToken / setup timing / `{{$timestamp}}` missing / `const` syntax / transient 5xx / HTML error page / real bug / env / account / flaky)
+1. Classify (spec drift / stale accessToken / setup timing / unique-field collision needing Mode A random / `const` syntax / transient 5xx / HTML error page / real bug / env / account / flaky)
 2. Apply the corresponding fix via Postman MCP (see qa-test-ticket.md Phase 6b for the full action table)
 3. Re-export the local collection JSON (see 8b)
 4. Re-run only the affected requests (no `--bail`)
@@ -855,14 +897,12 @@ curl -s -H "X-API-Key: $POSTMAN_API_KEY" \
   -o "<project-slug>-collection.json"
 ```
 
-Without this re-export, Newman keeps running the OLD local JSON and your patches will have no effect on the next iteration. Mandatory after every patch.
-
 After auto-fix:
 - Print a clear "Auto-fix log" showing what was changed in Postman cloud AND that the local JSON has been re-exported.
 - Anything still failing in a fixable category after 3 iterations is treated as "stuck" and surfaced to the user.
 - Anything in a non-fixable category (real bug / env / account / flaky) is surfaced as-is.
 
-The full debugging playbook (Phase 11) is still available for the user to consult after auto-fix gives up. The Jira bug-logging flow lives in `/qa-test-ticket` Phase 9, not here - first-time setup should not log bugs (the suite is meant to validate the API works at all, not raise tickets on day one).
+The full debugging playbook (`.claude/commands/qa-debugging-playbook.md`) is available for the user to consult after auto-fix gives up. The Jira bug-logging flow lives in `/qa-test-ticket` Phase 9, not here.
 
 ---
 
@@ -879,7 +919,7 @@ For each `(method, path)` in the OpenAPI spec, compute a SHA-256 hash of:
 
 ### 9b — Write the snapshot file
 
-Today's date: `YYYY-MM-DD`. Write to project root: `api-snapshot-<today>.json`:
+Today's date: `YYYY-MM-DD`. Write to project root: `project-snapshot-<today>.json`:
 
 ```json
 {
@@ -909,7 +949,7 @@ Today's date: `YYYY-MM-DD`. Write to project root: `api-snapshot-<today>.json`:
 }
 ```
 
-Confirm to user: `Initial snapshot written: api-snapshot-<today>.json (<N> endpoints baselined).`
+Confirm to user: `Initial snapshot written: project-snapshot-<today>.json (<N> endpoints baselined).`
 
 From now on, `/qa-api-sync` will diff against this file when developers push new/changed endpoints.
 
@@ -931,7 +971,7 @@ Failed:           <N>
 Report:           <path>/newman-reports/<file>.html
 
 .env written:     <path>/.env
-Spec snapshot:    <path>/api-snapshot-<today>.json  (<N> endpoints baselined)
+Spec snapshot:    <path>/project-snapshot-<today>.json  (<N> endpoints baselined)
 
 Next steps:
   - Run /qa-api-sync daily, or schedule it: /schedule daily at <user's preferred time> <user's timezone> /qa-api-sync
@@ -945,155 +985,10 @@ If server was unreachable → tell user everything is built and to run `./run-te
 
 ---
 
-## Phase 11 — Debugging failed tests (playbook)
+## Phase 11 — Debugging failed tests
 
-When the smoke test (Phase 8) reports any failed test, or when the user runs `./run-tests.sh` later and tests fail, do NOT auto-raise a Jira ticket. Walk through this triage methodically. This playbook is the canonical reference for all three agents (`/qa-test-ticket` and `/qa-api-sync` point back to it).
+When the smoke test (Phase 8) reports any failed test, or when the user runs `./run-tests.sh` later and tests fail, do NOT auto-raise a Jira ticket. Triage methodically.
 
-### 11a — Classify first (before any "fix")
+**Reference: `.claude/commands/qa-debugging-playbook.md`** — the canonical playbook used by all four QA agents. Covers: classify-first, HTML report walkthrough, curl reproduction (mandatory before Jira), common HTTP failure patterns, Newman flags, decision tree, what-not-to-do, and the "failure is actually correct behaviour" cases.
 
-Every failure falls into one of five categories. Identifying the category narrows the fix-path immediately:
-
-| Category | Signal | Where the fix lives |
-|---|---|---|
-| **Real bug** | Server returns wrong data or 500-class error, manual curl reproduces it | Raise a Jira ticket (after curl repro) |
-| **Spec drift** | Test expected one shape, response has a new/missing/renamed field | Run `/qa-api-sync` - the test isn't broken, the API moved |
-| **Test setup issue** | A precondition wasn't met (wrong state, missing entity) | Fix the Setup folder; downstream tests will pass once state is right |
-| **Environment issue** | Server unreachable, VPN dropped, DNS, expired account | Not a bug. Document and retry. |
-| **Flaky test** | Passes 3 of 5 runs without code changes | Log it, do not silently retry. Investigate root cause (timing, race, shared state) |
-
-### 11b — Read the HTML report properly
-
-The report is at `newman-reports/<project>-report-<timestamp>.html`. Open it in the browser. The order of investigation:
-
-1. **"Failed Tests" tab at the top** - jump straight to failures, skip the passes
-2. **Click into the failed request** - you get four tabs:
-   - **Request** - method, URL with rendered variables, headers, body actually sent
-   - **Response** - status code, headers, full response body
-   - **Test results** - which `pm.test(...)` assertion failed and why
-   - **Console** - any `console.log(...)` output from the test script
-3. **Note the timestamp** - if the team has server logs, cross-reference
-
-The single biggest mistake is judging a failure by status code alone. Always read the response body - APIs often return `{ "error": "Order must be APPROVED before submission", "code": "ORDER_NOT_APPROVED" }` which tells you exactly what went wrong.
-
-### 11c — Reproduce with curl (PROJECT RULE - never skip)
-
-This step is non-negotiable per project standards: before raising any ticket at any priority, the failing request must be reproduced manually with curl and its full response body read.
-
-Copy the request from the HTML report verbatim and run:
-
-```bash
-curl -X <METHOD> -v \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token-from-report>" \
-  -d '<body-from-report>' \
-  "<full-url-from-report>"
-```
-
-Interpret the result:
-
-- **Curl succeeds (2xx) but suite said failure** -> test setup issue (state was different when curl ran vs when suite ran) - check Setup folder
-- **Curl fails the same way as the suite** -> likely a real bug OR spec drift. Read the error message; if it mentions a field/shape change, run `/qa-api-sync` and re-test
-- **Curl returns a clearly informative error** ("validation failed: regionId is required") -> spec drift, run `/qa-api-sync`
-- **Curl returns 500 with a vague error or stack trace** -> real bug, raise a ticket with the curl command + full response in the description
-
-### 11d — Common HTTP failure patterns
-
-| Status | Pattern | Most likely cause |
-|---|---|---|
-| **401 on every request** | Cascade after login failed | Check the first Login request - it didn't save `accessToken`. Look at its response body. Common causes: wrong creds, login JSON path wrong (check `TOKEN_JSON_PATH` in `.env`), account locked |
-| **401 on one specific endpoint** | Cascade is fine elsewhere | Endpoint may need a special role/permission. Check ticket for "admin user" or similar role hints |
-| **400 (missing required field)** | Endpoint that worked yesterday | Spec drift - the API added a required field. Run `/qa-api-sync` |
-| **404 on Get/Update/Delete with `{{testEntityId}}`** | Earlier List/Create save script failed | Check the upstream request's test script - the ID chaining didn't work. Look for empty `testEntityId` in the environment |
-| **409 (conflict / duplicate)** | Happens on re-runs only | A field that should be unique isn't using `{{$timestamp}}`. Find it and add the placeholder |
-| **422 (unprocessable / wrong state)** | A state transition is illegal | Setup didn't build the expected precondition state. E.g. trying to approve an entity that's still DRAFT |
-| **429 (rate limit)** | Suite ran fine before, suddenly failing | Bump `--delay-request` from 300 to 1000+ ms |
-| **500 (server error)** | Vague stack trace in response | Real backend bug. Reproduce with curl, capture the request + response, raise a Jira ticket |
-| **Timeout / ECONNRESET** | Hit-or-miss failures | Server cold start, slow infra. Bump `--timeout-request` to 30000. If consistent, check server health |
-| **JSONError in test script** | Suite log says "JSONError" | Response wasn't JSON. Probably an HTML error page from a load balancer or proxy. Check the raw response body |
-| **`SyntaxError: Identifier already declared`** | Newman startup crash | A `const` slipped into top scope of a test script. Find it and change to `let` |
-
-### 11e — Newman flags for deeper digging (manual human use only)
-
-When the HTML report is not enough, the human can re-run Newman with debugging flags. **The agent's auto-fix phases never use `--bail`** - these flags are for the human, after auto-fix and the full report exist.
-
-```bash
-# Run only one folder
-newman run <project>-collection.json -e newman-env.json --folder "00. Authentication"
-
-# Run only a single named request
-newman run <project>-collection.json -e newman-env.json --folder "TC11: Submit Order - Already Submitted"
-
-# Verbose: full request + response bodies in console
-newman run <project>-collection.json -e newman-env.json --verbose
-
-# Stop at first failure (HUMAN TRIAGE ONLY - useful when chasing a single cascading bug;
-# never use this for the full suite, you want the report to be complete)
-newman run <project>-collection.json -e newman-env.json --bail
-
-# Increase per-request timeout for slow staging servers
-newman run <project>-collection.json -e newman-env.json --timeout-request 30000
-
-# Slow down requests if hitting rate limits
-newman run <project>-collection.json -e newman-env.json --delay-request 1000
-
-# Combine: verbose + single failing folder - the "give me everything about this one failure" combo
-# (notice: no --bail - the folder is already scoped, and you want every failure in it)
-newman run <project>-collection.json -e newman-env.json \
-  --folder "<folder>" --verbose
-```
-
-**Rule of thumb for `--bail`:** Only use it when you are narrowing in on ONE specific failing request and you want to stop the moment it fails so you can grab the verbose output. For everything else - full suite runs, folder runs, auto-fix re-runs - do not bail.
-
-### 11f — Decision tree: what to do next
-
-```
-Test failed
-│
-├── Did the server respond at all?
-│   ├── No  → environment issue (VPN/DNS/server down) → retry, don't raise ticket
-│   └── Yes → continue
-│
-├── Does the response shape match what the test expected?
-│   ├── No  → spec drift → /qa-api-sync → re-run
-│   └── Yes → continue
-│
-├── Reproduce with curl. Does curl fail the same way?
-│   ├── No  → test setup issue (state was different) → fix Setup folder
-│   └── Yes → continue
-│
-├── Is the response body informative (clear error message)?
-│   ├── Yes → fix the cause it points to (often a precondition or input)
-│   └── No  (vague 500) → real bug → raise Jira ticket
-│
-└── Always include in the ticket: full curl command, full response body,
-    timestamp, suite name (<KEY>-XXX), and a one-line summary of expected vs actual
-```
-
-### 11g — What NOT to do
-
-- Do NOT modify a test to make it pass without understanding why it failed. That's how you hide real bugs.
-- Do NOT immediately raise a ticket without curl repro - per project rule, all tickets need manual reproduction.
-- Do NOT blame the test framework first. Newman/Postman bugs are rare; spec drift and state issues are common.
-- Do NOT ignore intermittent failures. A test that fails 1 in 10 times is hiding a real timing/race/state issue and will eventually fail in production.
-- Do NOT delete failing tests. If a test is genuinely no longer relevant, archive it (rename to `[ARCHIVED] <name>`) so the history stays visible.
-
-### 11h — When the failure is actually correct behavior
-
-Some "failures" are the test correctly catching a known limitation:
-
-- Negative tests SHOULD fail with their expected error code - if `TC11: Submit Order - Already Submitted (400)` returns 400, that's a pass, not a fail. Make sure you're reading the report correctly.
-- A status assertion that says "expected 200 got 201" might be a spec drift where the API now correctly returns 201 for creates - update the assertion, not the request.
-
----
-
-## Reliability notes
-
-- **Login must run first** — it sets `accessToken` for all downstream requests
-- **`{{$timestamp}}` for unique fields** prevents 409 on re-run
-- **ID chaining** — List requests save first item's ID; Get/Update/Delete use `{{testEntityId}}`
-- **Never `const` at test script top scope** — use `let`
-- **API-key endpoints** — set `auth.type = "noauth"` + manual `Authorization: ApiKey {{platformApiKey}}` header to override collection-level bearer auth
-- **Never write `POSTMAN_API_KEY` to project `.env`** — it lives in `.claude/settings.local.json` (project-local, gitignored) or `~/.claude/settings.json` (global). Local wins if both set.
-- **Never write workspace ID to `.env`** — always list fresh
-- **Never `--bail` the Newman run** — initial run + auto-fix iterations must complete fully so the HTML report captures every failure in one pass. `--bail` is reserved for human-driven single-bug triage in Phase 11e.
-- **Cloud + local JSON stay in sync** — every Postman MCP `updateCollectionRequest` call must be immediately followed by re-exporting the local `<project-slug>-collection.json` (the curl in Phase 8b). Otherwise Newman re-runs the old state and your patches do nothing.
+The playbook is shared with `/qa-test-ticket` and `/qa-api-sync` — single source of truth for debugging guidance.

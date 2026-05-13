@@ -132,6 +132,67 @@ def classify_msg_issue(msg, status_code, request_name):
         "A user seeing this message cannot tell what they did wrong."
     )
 
+def classify_roundtrip_issue(assertion_name, error_message, request_name):
+    """Round-trip mismatch: agent sent field X with value V, response didn't echo V back.
+    Strongest catch class introduced by Mode A — API silently dropped/transformed a field.
+    """
+    field = '(unknown)'
+    m = re.match(r'^([\w\.\[\]]+)\s+round-trip$', assertion_name or '')
+    if m:
+        field = m.group(1)
+    return (
+        f"Round-trip assertion failed for field `{field}` on `{request_name}`. "
+        f"The API was sent a value for this field but the response either omitted it, "
+        f"returned a different value, or returned it under a different path. "
+        f"Possibilities: (a) silent field drop — API regression, (b) field is server-mutated "
+        f"(timestamp/normalized) — exclude from round-trip if expected, (c) response shape changed "
+        f"— run `/qa-api-sync`. Assertion error: {error_message}"
+    )
+
+def classify_schema_issue(error_message, request_name):
+    """Schema validation: response did not match the OpenAPI 2xx response schema."""
+    return (
+        f"Response shape did not match the spec's declared schema for `{request_name}`. "
+        f"The API returned extra fields, missing required fields, renamed fields, or wrong types. "
+        f"This is spec drift — run `/qa-api-sync` to refresh the snapshot and update the collection. "
+        f"If the spec is correct and the API is wrong, this is a backend regression. "
+        f"Validator error: {error_message}"
+    )
+
+def classify_xcut_issue(assertion_name, error_message, request_name, status_code):
+    """Cross-cutting assertion failed: response time, sensitive leak, error body, stack trace."""
+    aname = (assertion_name or '').lower()
+    if 'response time' in aname:
+        return (
+            f"Response time SLA violated on `{request_name}`. The endpoint took longer than the "
+            f"configured `RESPONSE_TIME_SLA_MS` budget. Check backend logs, downstream services, "
+            f"or DB query performance. Persistent slow endpoints degrade UX and are visible to users."
+        )
+    if 'sensitive data' in aname or 'sensitive' in aname:
+        return (
+            f"Sensitive data leaked in response from `{request_name}`. The response body contained "
+            f"a password, API key, private key, or other secret. Real security issue — passwords "
+            f"and credentials must never appear in responses, even on internal endpoints."
+        )
+    if 'error body' in aname or 'has structure' in aname:
+        return (
+            f"Error response from `{request_name}` (HTTP {status_code}) did not have the expected "
+            f"structured shape (code + message). Clients can't reliably parse the error to show "
+            f"useful feedback. Backend should return a consistent error envelope across all 4xx/5xx."
+        )
+    if 'stack trace' in aname:
+        return (
+            f"Stack trace leaked in 5xx response from `{request_name}`. The response body contains "
+            f"internal exception/traceback content (Java/Python/Node stack frames). Real security "
+            f"issue — internal implementation details exposed to clients. Backend should return a "
+            f"generic error and log details server-side only."
+        )
+    # Generic fallback for any other cross-cutting assertion we add later
+    return (
+        f"Cross-cutting assertion `{assertion_name}` failed on `{request_name}` "
+        f"(HTTP {status_code}). Investigate the assertion and the response body."
+    )
+
 def main():
     if len(sys.argv) < 6:
         print("Usage: generate-issues.py <timestamp> <results.json> <output-dir> <project-slug> <project-name>")
@@ -213,6 +274,41 @@ def main():
                     'reason':     classify_msg_issue(full_msg, status_code, request_name),
                 })
 
+            elif re.match(r'^[\w\.\[\]]+\s+round-trip$', aname) and error:
+                issues.append({
+                    'type':    'Round-trip mismatch (Mode A)',
+                    'request': request_name,
+                    'method':  method,
+                    'url':     url,
+                    'status':  status_code,
+                    'reason':  classify_roundtrip_issue(aname, error.get('message', ''), request_name),
+                })
+
+            elif aname == 'Response matches schema' and error:
+                issues.append({
+                    'type':    'Schema validation failed',
+                    'request': request_name,
+                    'method':  method,
+                    'url':     url,
+                    'status':  status_code,
+                    'reason':  classify_schema_issue(error.get('message', ''), request_name),
+                })
+
+            elif error and (
+                'Response time' in aname
+                or 'sensitive data' in aname.lower()
+                or 'Error body has structure' in aname
+                or 'stack trace' in aname.lower()
+            ):
+                issues.append({
+                    'type':    'Cross-cutting check failed',
+                    'request': request_name,
+                    'method':  method,
+                    'url':     url,
+                    'status':  status_code,
+                    'reason':  classify_xcut_issue(aname, error.get('message', ''), request_name, status_code),
+                })
+
     output_file = os.path.join(output_dir, f'{project_slug}-issues-{timestamp}.txt')
     os.makedirs(output_dir, exist_ok=True)
 
@@ -235,7 +331,7 @@ def main():
                     expected_str = ' or '.join(str(s) for s in issue['expected_statuses'])
                     f.write(f'Status   : HTTP {issue["status"]} (expected {expected_str})\n')
                     f.write(f'Why      : {issue["reason"]}\n')
-                else:
+                elif issue['type'] == 'Message quality':
                     f.write(f'Status   : HTTP {issue["status"]}\n')
                     f.write(f'Actual   : "{issue["actual_msg"]}"\n')
                     f.write(f'Why      : {issue["reason"]}\n')
@@ -243,6 +339,10 @@ def main():
                     f.write( '           and tell the user what input is accepted.\n')
                     f.write( '           e.g. "name contains invalid characters - XSS payload not allowed"\n')
                     f.write( '                "role name already exists - choose a different name"\n')
+                else:
+                    # Round-trip mismatch / Schema validation / Cross-cutting check
+                    f.write(f'Status   : HTTP {issue["status"]}\n')
+                    f.write(f'Why      : {issue["reason"]}\n')
                 f.write('-' * 65 + '\n\n')
 
         f.write('\nGenerated by generate-issues.py\n')
