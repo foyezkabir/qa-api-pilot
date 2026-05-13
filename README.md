@@ -45,42 +45,42 @@ A 30-second visual orientation before the narrative below.
 
 ```
                   ┌───────────────────────────────┐
-                  │   OpenAPI spec                 │  URL or local file
-                  │   (Scalar / Swagger UI /       │
-                  │    Redoc / raw JSON-YAML)       │
+                  │   OpenAPI spec                │  URL or local file
+                  │   (Scalar / Swagger UI /      │
+                  │    Redoc / raw JSON-YAML)     │
                   └───────────────┬───────────────┘
                                   │ read
                                   ▼
        ┌─────────────────────────────────────────────────────┐
-       │   /qa-api-test-setup     (one-time, day 1)            │
-       │   • dependency audit + flow order                      │
-       │   • negative matrix per endpoint                       │
-       │   • module-wise batched build                          │
+       │   /qa-api-test-setup     (one-time, day 1)          │
+       │   • dependency audit + flow order                   │
+       │   • negative matrix per endpoint                    │
+       │   • module-wise batched build                       │
        └────────────────────────┬────────────────────────────┘
                                 │ writes
                                 ▼
    ┌──────────────────────────────────────────────────────────────┐
-   │  <project-slug>-collection.json    (cloud + local mirror)     │
-   │  <ProjectName> Environment          (cloud, shared by all)    │
-   │  newman-env.json                    (local mirror of env)     │
-   │  api-snapshot-YYYY-MM-DD.json        (drift baseline)          │
-   │  run-tests.sh, generate-issues.py    (rendered from templates) │
-   │  collection-run-issues/*-coverage-*  (coverage report)         │
+   │  <project-slug>-collection.json    (cloud + local mirror)    │
+   │  <ProjectName> Environment          (cloud, shared by all)   │
+   │  newman-env.json                    (local mirror of env)    │
+   │  api-snapshot-YYYY-MM-DD.json        (drift baseline)        │
+   │  run-tests.sh, generate-issues.py   (rendered from templates)│
+   │  collection-run-issues/*-coverage-*  (coverage report)       │
    └──────────────────────────────────────────────────────────────┘
                                 │ read by
               ┌─────────────────┼────────────────────┐
               ▼                 ▼                    ▼
   ┌──────────────────┐  ┌────────────────┐   ┌──────────────────────┐
-  │  /qa-api-sync     │  │ /qa-test-      │   │  /qa-negative-audit  │
-  │  (daily, auto)    │  │ ticket <KEY>   │   │  (on-demand)         │
-  │                   │  │ (per Jira      │   │                      │
-  │ patches spec      │  │  ticket)       │   │ reads collection +   │
-  │ drift into        │  │                │   │ matrix → reports     │
-  │ collection +      │  │ creates        │   │ coverage gaps →      │
-  │ env + bumps       │  │ <KEY>-         │   │ fills them in        │
-  │ snapshot date     │  │ collection,    │   │ module-wise batches  │
-  │                   │  │ shares the     │   │ with checkpoint      │
-  │                   │  │ project env    │   │ resume               │
+  │  /qa-api-sync    │  │ /qa-test-      │   │  /qa-negative-audit  │
+  │  (daily, auto)   │  │ ticket <KEY>   │   │  (on-demand)         │
+  │                  │  │ (per Jira      │   │                      │
+  │ patches spec     │  │  ticket)       │   │ reads collection +   │
+  │ drift into       │  │                │   │ matrix → reports     │
+  │ collection +     │  │ creates        │   │ coverage gaps →      │
+  │ env + bumps      │  │ <KEY>-         │   │ fills them in        │
+  │ snapshot date    │  │ collection,    │   │ module-wise batches  │
+  │                  │  │ shares the     │   │ with checkpoint      │
+  │                  │  │ project env    │   │ resume               │
   └──────────────────┘  └────────────────┘   └──────────────────────┘
                                 │
                                 ▼
